@@ -1,0 +1,50 @@
+{
+  "name": "bb-plugin-projects",
+  "version": "0.1.0",
+  "description": "Cursor-style project boards for BB, built on the Tasks plugin.",
+  "author": {
+    "name": "WYEZ",
+    "url": "https://github.com/wy3z"
+  },
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "README.md",
+    "app.css",
+    "app.tsx",
+    "dist",
+    "src",
+    "server.ts",
+    "skills"
+  ],
+  "scripts": {
+    "build": "bb plugin build",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "bb": ">=0.48.1",
+    "bbPluginSdk": ">=0.6.104"
+  },
+  "bb": {
+    "name": "Projects",
+    "description": "Cursor-style board and list views over BB Tasks, with live agents, pull requests and changes on every card.",
+    "branding": {
+      "icon": "Layers"
+    },
+    "app": "./app.tsx",
+    "server": "./server.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.104",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}
