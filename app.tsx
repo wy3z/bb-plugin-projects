@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   definePluginApp,
   experimental_useRpcQuery,
+  experimental_useSidebarThreads,
   type ExperimentalThreadTabProps,
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
@@ -28,10 +29,20 @@ function ProjectIcon({ className }: { className?: string }) {
 function useManagedProject(threadId: string): { project: Project | null; projects: Project[] } {
   const { projects } = useProjects();
   const leads = experimental_useRpcQuery({ contract: projectsContract, method: "listLeads", input: {} });
+  const { threads } = experimental_useSidebarThreads();
   const project = useMemo(() => {
-    const lead = leads.data?.leads.find((item) => item.threadId === threadId);
-    return lead ? projects.find((item) => item.id === lead.projectId) ?? null : null;
-  }, [leads.data, projects, threadId]);
+    const byLead = new Map((leads.data?.leads ?? []).map((item) => [item.threadId, item.projectId]));
+    const byId = new Map(threads.map((thread) => [thread.id, thread]));
+    const seen = new Set<string>();
+    let cursor: string | null = threadId;
+    while (cursor && !seen.has(cursor)) {
+      const projectId = byLead.get(cursor);
+      if (projectId) return projects.find((item) => item.id === projectId) ?? null;
+      seen.add(cursor);
+      cursor = byId.get(cursor)?.parentThreadId ?? null;
+    }
+    return null;
+  }, [leads.data, projects, threadId, threads]);
   return { project, projects };
 }
 const LAST_KEY = "bb-projects:last";
@@ -80,7 +91,7 @@ function ProjectsPage({ subPath }: PluginNavPanelProps) {
 function ProjectTab({ threadId }: ExperimentalThreadTabProps) {
   const { project, projects } = useManagedProject(threadId);
   if (!project) {
-    return <div className="bbp-empty">This thread isn't managing a project.</div>;
+    return <div className="bbp-empty">This thread isn't part of a project.</div>;
   }
   return (
     <div className="bbp-tab">
