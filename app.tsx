@@ -20,8 +20,10 @@ const PROJECT_TAB = { id: "manager-project", context: { kind: "thread" }, availa
 function ProjectIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M8.5 8V6.5a2.5 2.5 0 0 1 2.5-2.5h6.5a2.5 2.5 0 0 1 2.5 2.5V13a2.5 2.5 0 0 1-2.5 2.5H16" />
-      <rect x="4" y="8.5" width="12" height="11.5" rx="2.5" />
+      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+      <path d="M8.5 7.5v8" />
+      <path d="M12 7.5v4" />
+      <path d="M15.5 7.5v6" />
     </svg>
   );
 }
