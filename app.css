@@ -1166,3 +1166,127 @@
   display: inline-block;
   vertical-align: top;
 }
+
+header[data-bb-projects-tabs] [data-testid="app-page-header-content-row"] > div > div > div:has(> p) {
+  display: none;
+}
+.bbp-tabs-host {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.bbp-tabs {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.bbp-tabs::-webkit-scrollbar {
+  display: none;
+}
+.bbp-tabs__tab {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 3.5rem;
+  max-width: 13rem;
+  align-items: center;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.bbp-tabs__tab:hover {
+  background: var(--state-hover, color-mix(in oklab, var(--foreground) 6%, transparent));
+  color: var(--foreground);
+}
+.bbp-tabs__tab[data-selected] {
+  background: var(--surface-selected, color-mix(in oklab, var(--foreground) 9%, transparent));
+  color: var(--foreground);
+}
+.bbp-tabs__tab[data-lead] {
+  flex-shrink: 0;
+}
+.bbp-tabs__label {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.bbp-tabs__tab:not([data-lead]) .bbp-tabs__label {
+  padding-right: 22px;
+}
+.bbp-tabs__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bbp-tabs__icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.bbp-tabs__spin {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  animation: spin 1s linear infinite;
+  color: var(--muted-foreground);
+}
+.bbp-tabs__dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: var(--timeline-accent);
+}
+.bbp-tabs__dot[data-tone="input"] {
+  background: var(--warning, var(--attention));
+}
+.bbp-tabs__dot[data-tone="failed"] {
+  background: var(--destructive);
+}
+.bbp-tabs__close {
+  position: absolute;
+  right: 4px;
+  display: flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  opacity: 0;
+  cursor: pointer;
+}
+.bbp-tabs__close svg {
+  width: 12px;
+  height: 12px;
+}
+.bbp-tabs__tab:hover .bbp-tabs__close,
+.bbp-tabs__tab[data-selected] .bbp-tabs__close,
+.bbp-tabs__close:focus-visible {
+  opacity: 1;
+}
+.bbp-tabs__close:hover {
+  background: var(--state-hover, color-mix(in oklab, var(--foreground) 10%, transparent));
+  color: var(--foreground);
+}
+@media (hover: none) {
+  .bbp-tabs__close {
+    opacity: 1;
+  }
+}

@@ -8,6 +8,7 @@ import {
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import { ProjectView } from "./src/ProjectView";
+import { ManagerTabs } from "./src/ManagerTabs";
 import { useProjects } from "./src/data";
 import type { Project } from "./src/contracts";
 import { projectsContract } from "./src/meta";
@@ -101,6 +102,7 @@ export default definePluginApp((app) => {
     path: "projects",
     component: ProjectsPage,
   });
+  app.slots.experimental_appOverlay({ id: "manager-tabs", component: ManagerTabs });
   app.slots.experimental_tab({
     ...PROJECT_TAB,
     title: "Project",
