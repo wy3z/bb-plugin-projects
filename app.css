@@ -542,10 +542,10 @@
   color: var(--bbp-red);
 }
 .bbp-diff[data-sign="plus"] {
-  color: var(--bbp-green);
+  color: var(--diff-added, var(--bbp-green));
 }
 .bbp-diff[data-sign="minus"] {
-  color: var(--bbp-red);
+  color: var(--diff-removed, var(--bbp-red));
 }
 
 .bbp-menu {
