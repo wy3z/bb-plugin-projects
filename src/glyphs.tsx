@@ -1,3 +1,4 @@
+import { shortAge } from "@wy3z/bb-suite/time";
 import type { Priority, Status } from "./contracts";
 
 export const STATUS_LABEL: Record<Status, string> = {
@@ -114,12 +115,5 @@ export function Dot({ tone }: { tone: "working" | "input" | "failed" | "idle" })
 }
 
 export function formatElapsed(fromIso: string | number, now: number): string {
-  const from = typeof fromIso === "number" ? fromIso : Date.parse(fromIso);
-  const seconds = Math.max(0, Math.round((now - from) / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
+  return shortAge(fromIso, now);
 }

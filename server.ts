@@ -69,10 +69,10 @@ export default function plugin(bb: BbPluginApi) {
     getMeta: ({ projectId }) => readMeta(projectId),
     listLeads: async () => {
       const keys = await bb.storage.kv.list("meta:");
-      const leads: { projectId: string; threadId: string }[] = [];
+      const leads: { projectId: string; threadId: string; focus: string | null }[] = [];
       for (const storageKey of keys) {
         const stored = await bb.storage.kv.get<ProjectMeta>(storageKey);
-        if (stored?.leadThreadId) leads.push({ projectId: storageKey.slice("meta:".length), threadId: stored.leadThreadId });
+        if (stored?.leadThreadId) leads.push({ projectId: storageKey.slice("meta:".length), threadId: stored.leadThreadId, focus: stored.focus ?? null });
       }
       return { leads };
     },

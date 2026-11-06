@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { experimental_Icon as Icon, useBbNavigate, useSdk } from "@get-bb/plugin-sdk/app";
 import {
-  AGENT_PILLS_PLUGIN,
+  PULL_REQUESTS_PLUGIN,
   TASKS_PLUGIN,
-  agentPillsContract,
+  gitActionsContract,
   tasksContract,
   type Label,
   type Preset,
@@ -135,10 +135,10 @@ export function TaskCard({
     workerEnv && ctx.targetEnvironmentId
       ? run("Applying…", async () => {
           const result = await sdk.plugins.callRpc({
-            pluginId: AGENT_PILLS_PLUGIN,
+            pluginId: PULL_REQUESTS_PLUGIN,
             method: "gitApplyLocally",
             input: { sourceEnvironmentId: workerEnv, targetEnvironmentId: ctx.targetEnvironmentId! },
-            outputSchema: agentPillsContract.gitApplyLocally.output,
+            outputSchema: gitActionsContract.gitApplyLocally.output,
           });
           return result.ok
             ? { ok: true, text: `Applied ${result.files ?? 0} ${result.files === 1 ? "file" : "files"}` }
@@ -150,10 +150,10 @@ export function TaskCard({
     workerEnv
       ? run("Creating pull request…", async () => {
           const result = await sdk.plugins.callRpc({
-            pluginId: AGENT_PILLS_PLUGIN,
+            pluginId: PULL_REQUESTS_PLUGIN,
             method: "gitCreatePullRequest",
             input: { environmentId: workerEnv },
-            outputSchema: agentPillsContract.gitCreatePullRequest.output,
+            outputSchema: gitActionsContract.gitCreatePullRequest.output,
           });
           return result.ok
             ? { ok: true, text: result.existed ? "Pull request already open" : "Opened pull request" }

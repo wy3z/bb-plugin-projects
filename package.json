@@ -38,6 +38,7 @@
     ]
   },
   "dependencies": {
+    "@wy3z/bb-suite": "file:../bb-suite-shared",
     "zod": "^4.3.6"
   },
   "devDependencies": {
