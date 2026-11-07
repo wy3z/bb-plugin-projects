@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { createPortal } from "react-dom";
 import {
   experimental_Icon as Icon,
+  experimental_useAppPanel,
+  experimental_usePanelTabs,
   experimental_useRpcQuery,
   experimental_useSidebarThreads,
   useBbContext,
@@ -13,6 +15,75 @@ import { projectsContract } from "./meta";
 const STORE_KEY = "bb-projects:tabs";
 const HOST_ATTR = "data-bb-projects-tabs";
 const HEADER_SELECTOR = "header:has([data-thread-header-workflow-actions])";
+const PROJECT_TAB = { id: "manager-project", context: { kind: "thread" }, availability: "fixed" } as const;
+
+type PanelCarry = { to: string; mode: "project" | "closed" };
+
+let pendingCarry: PanelCarry | null = null;
+let livePanel: { threadId: string; mode: PanelCarry["mode"] | null } | null = null;
+let carrySeq = 0;
+const carryListeners = new Set<() => void>();
+
+function setCarry(next: PanelCarry | null) {
+  pendingCarry = next;
+  carrySeq++;
+  for (const listener of carryListeners) listener();
+}
+
+function useCarrySeq(): number {
+  return useSyncExternalStore(
+    (listener) => {
+      carryListeners.add(listener);
+      return () => carryListeners.delete(listener);
+    },
+    () => carrySeq,
+  );
+}
+
+function isProjectTab(state: ReturnType<ReturnType<typeof experimental_useAppPanel>["getTabs"]>): boolean {
+  const selected = state.tabs.find((tab) => tab.key === state.selectedKey);
+  return state.open && selected?.detail.kind === "plugin" && selected.detail.pluginId === "projects" && selected.detail.tab.id === PROJECT_TAB.id;
+}
+
+export function useCarryPanel({ threadId }: { threadId: string }): boolean {
+  const panel = experimental_useAppPanel();
+  const panelTabs = experimental_usePanelTabs();
+  const seq = useCarrySeq();
+  useEffect(() => {
+    if (pendingCarry?.to === threadId) return;
+    livePanel = { threadId, mode: rememberPanel(panelTabs) };
+  }, [panelTabs, threadId]);
+  useEffect(() => {
+    const pending = pendingCarry;
+    if (!pending || pending.to !== threadId) return;
+    let frames = 0;
+    let stable = 0;
+    let handle = 0;
+    const apply = () => {
+      const state = panel.getTabs();
+      const settled = pending.mode === "closed" ? !state.open : isProjectTab(state);
+      if (settled) stable++;
+      else {
+        stable = 0;
+        if (pending.mode === "project") panel.openTab({ tab: PROJECT_TAB });
+        else panel.close();
+      }
+      if (stable >= 20 || ++frames > 120) {
+        if (pendingCarry === pending) pendingCarry = null;
+        return;
+      }
+      handle = requestAnimationFrame(apply);
+    };
+    handle = requestAnimationFrame(apply);
+    return () => cancelAnimationFrame(handle);
+  }, [panel, seq, threadId]);
+  return false;
+}
+
+export function rememberPanel(panelTabs: ReturnType<ReturnType<typeof experimental_useAppPanel>["getTabs"]>): PanelCarry["mode"] | null {
+  if (isProjectTab(panelTabs)) return "project";
+  return panelTabs.open ? null : "closed";
+}
 
 type TabStore = Record<string, string[]>;
 
@@ -143,14 +214,23 @@ export function ManagerTabs() {
     writeStore({ ...snapshot, [leadId]: [...open, threadId] });
   }, [leadId, threadId]);
 
+  const go = useCallback(
+    (id: string) => {
+      const mode = livePanel?.threadId === threadId ? livePanel.mode : null;
+      setCarry(mode ? { to: id, mode } : null);
+      navigate.toThread(id);
+    },
+    [navigate, threadId],
+  );
+
   const close = useCallback(
     (id: string) => {
       if (!leadId) return;
       const index = tabs.indexOf(id);
       writeStore({ ...snapshot, [leadId]: (snapshot[leadId] ?? []).filter((item) => item !== id) });
-      if (id === threadId) navigate.toThread(tabs[index - 1] ?? leadId);
+      if (id === threadId) go(tabs[index - 1] ?? leadId);
     },
-    [leadId, navigate, tabs, threadId],
+    [go, leadId, tabs, threadId],
   );
 
   const host = useHeaderHost(leadId !== null, threadId);
@@ -171,7 +251,7 @@ export function ManagerTabs() {
               className="bbp-tabs__label"
               title={thread?.displayTitle}
               onClick={() => {
-                if (!selected) navigate.toThread(id);
+                if (!selected) go(id);
               }}
               onAuxClick={(event) => {
                 if (event.button === 1 && !isLead) {

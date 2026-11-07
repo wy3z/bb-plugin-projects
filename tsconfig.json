@@ -37,5 +37,8 @@
     "components",
     "lib",
     "hooks"
+  ],
+  "exclude": [
+    "**/*.test.ts"
   ]
 }

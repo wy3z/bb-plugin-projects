@@ -9,7 +9,7 @@ import {
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import { ProjectView } from "./src/ProjectView";
-import { ManagerTabs } from "./src/ManagerTabs";
+import { ManagerTabs, useCarryPanel } from "./src/ManagerTabs";
 import { useProjects } from "./src/data";
 import type { Project } from "./src/contracts";
 import { projectsContract } from "./src/meta";
@@ -116,6 +116,14 @@ export default definePluginApp((app) => {
     component: ProjectsPage,
   });
   app.slots.experimental_appOverlay({ id: "manager-tabs", component: ManagerTabs });
+  app.slots.experimental_threadContextSegment({
+    id: "manager-panel-carry",
+    title: "Project side panel",
+    group: "9_projects",
+    order: 99,
+    summary: () => null,
+    useVisible: useCarryPanel,
+  });
   app.slots.experimental_tab({
     ...PROJECT_TAB,
     title: "Project",
