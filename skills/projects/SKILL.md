@@ -67,7 +67,11 @@ bb push-notifications send --thread <your thread id> --title "<PREFIX>: <what ha
 
 - Ready for the user: a task moved to `in_review`, or a PR is ready to merge.
 - Needs the user: a decision, credentials, access, or a worker blocked on them.
-  A question typed at the end of a turn does not notify; send one.
+  A question at the end of a turn does not notify on its own, whether it is
+  typed or a ```ui block that waits for an answer (Form, Button choices,
+  Decision, Plan, OptionCards, Choice). Whenever your reply asks the user to
+  pick, approve or fill something in, send one in the same turn, naming the
+  question in the body.
 - Complete: everything in the current focus or plan is done.
 
 One notification per event, never for progress, a worker starting, a card
