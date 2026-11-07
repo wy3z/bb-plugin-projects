@@ -1455,3 +1455,8 @@ header[data-bb-projects-tabs] [data-testid="app-page-header-content-row"] > div 
   flex: 1;
   min-height: 0;
 }
+.bbp-chat-host div:has(> [data-app-composer]) {
+  width: 100%;
+  max-width: 760px;
+  margin-inline: auto;
+}
