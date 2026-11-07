@@ -18,12 +18,12 @@ live cards, and a project lead workflow.
   worktree into the project checkout), Create PR, Open in Tasks. Apply and
   Create PR call the Agent Pills plugin's git actions, so that plugin must be
   installed.
-- **Focus card**: one or two sentences on what matters now, editable on the
-  board or with `bb projects focus`.
-- **Project lead**: a thread recorded as the lead (`bb projects lead`), linked
-  from the board. The `projects` skill teaches it to plan, delegate as child
-  threads attached to tasks, keep the board true and write status updates.
-- **Loop card**: the lead's triggers and memory under the focus card. A
+- **Focus**: one or two sentences on what matters now, kept for the lead with
+  `bb projects focus`. It isn't shown on the board.
+- **Project lead**: a thread recorded as the lead (`bb projects lead`). The
+  `projects` skill teaches it to plan, delegate as child threads attached to
+  tasks, keep the board true and write status updates.
+- **Loop**: behind the loop button in the board header. A
   scheduled board sweep (off, 1h to 8h, weekdays 08:00-19:00 by default),
   following every PR the lead's workers link, the project's memory notes, and
   the last messages from the outer loop.

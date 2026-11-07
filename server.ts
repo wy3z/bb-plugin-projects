@@ -234,7 +234,7 @@ export default function plugin(bb: BbPluginApi) {
           },
         }),
         focus: cliCommand({
-          summary: "Show, set or clear the project's focus line, shown as a card at the top of the board",
+          summary: "Show, set or clear the project's focus line, which the lead reads and the board doesn't show",
           positionals: [
             { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
             { name: "text", description: "New focus, one or two sentences; omit to show the current one", variadic: true },
