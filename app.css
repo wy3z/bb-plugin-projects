@@ -250,21 +250,6 @@
   height: 14px;
   color: var(--bbp-muted);
 }
-.bbp-status[data-status="todo"] {
-  color: color-mix(in srgb, var(--foreground) 55%, transparent);
-}
-.bbp-status[data-status="in_progress"] {
-  color: var(--bbp-amber);
-}
-.bbp-status[data-status="in_review"] {
-  color: var(--bbp-green);
-}
-.bbp-status[data-status="done"] {
-  color: var(--bbp-accent);
-}
-.bbp-status[data-status="canceled"] {
-  color: color-mix(in srgb, var(--foreground) 35%, transparent);
-}
 .bbp-priority {
   flex: 0 0 auto;
   width: 13px;
@@ -729,6 +714,43 @@
   height: var(--bbs-icon);
   color: var(--bbp-muted);
 }
+.bbp-filter {
+  min-width: 232px;
+}
+.bbp-filter__search {
+  display: flex;
+  align-items: center;
+  gap: var(--bbs-gap);
+  height: var(--bbs-height);
+  padding: 0 8px;
+  color: var(--bbp-muted);
+}
+.bbp-filter__search svg,
+.bbp-filter__search [data-icon-root] {
+  flex: 0 0 auto;
+  width: var(--bbs-icon);
+  height: var(--bbs-icon);
+}
+.bbp-filter__search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--bbs-text-primary);
+  font: inherit;
+  font-size: var(--bbs-pill-font);
+}
+.bbp-filter__status {
+  gap: 10px;
+}
+.bbp-filter__status input {
+  margin: 0;
+  accent-color: var(--bbp-accent);
+}
+.bbp-filter__status .bbp-status {
+  color: var(--bbp-muted);
+}
 .bbp-menu__check input {
   margin: 0 0 0 auto;
   accent-color: var(--bbp-accent);
@@ -804,9 +826,6 @@
 .bbp-group__head .bbp-column__count {
   color: var(--bbs-text-tertiary);
   font-size: var(--bbs-text-row);
-}
-.bbp-list .bbp-status {
-  color: var(--bbp-muted);
 }
 .bbp-group__head > svg:first-child,
 .bbp-group__head > [data-icon-root]:first-child {

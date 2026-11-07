@@ -11,11 +11,46 @@ import { usePopover } from "./usePopover";
 
 type View = "board" | "list";
 
-const BOARD_COLUMNS: Status[] = ["backlog", "todo", "in_progress", "in_review", "done"];
-const LIST_ORDER: Status[] = ["in_progress", "in_review", "todo", "backlog", "done"];
+const BOARD_COLUMNS: Status[] = ["backlog", "todo", "in_progress", "in_review", "done", "canceled"];
+const LIST_ORDER: Status[] = ["in_progress", "in_review", "todo", "backlog", "done", "canceled"];
+const FILTER_ORDER: Status[] = ["in_review", "in_progress", "todo", "backlog", "done", "canceled"];
+const DEFAULT_SHOWN: Status[] = ["in_review", "in_progress", "todo", "backlog", "done"];
 
 const VIEW_KEY = "bb-projects:view";
 const CANCELED_KEY = "bb-projects:show-canceled";
+const STATUSES_KEY = "bb-projects:statuses:";
+
+function readShown(projectId: string): ReadonlySet<Status> {
+  try {
+    const saved = localStorage.getItem(STATUSES_KEY + projectId);
+    if (saved) {
+      const parsed: unknown = JSON.parse(saved);
+      if (Array.isArray(parsed)) return new Set(FILTER_ORDER.filter((status) => parsed.includes(status)));
+    }
+    const legacyCanceled = localStorage.getItem(CANCELED_KEY) === "1";
+    return new Set<Status>(legacyCanceled ? [...DEFAULT_SHOWN, "canceled"] : DEFAULT_SHOWN);
+  } catch {
+    return new Set(DEFAULT_SHOWN);
+  }
+}
+
+function useStatusFilter(projectId: string) {
+  const [state, setState] = useState(() => ({ projectId, shown: readShown(projectId) }));
+  const shown = state.projectId === projectId ? state.shown : readShown(projectId);
+  const toggle = (status: Status) => {
+    const next = new Set(shown);
+    if (next.has(status)) next.delete(status);
+    else next.add(status);
+    setState({ projectId, shown: next });
+    try {
+      localStorage.setItem(STATUSES_KEY + projectId, JSON.stringify(FILTER_ORDER.filter((item) => next.has(item))));
+    } catch {
+      return;
+    }
+  };
+  const isDefault = shown.size === DEFAULT_SHOWN.length && DEFAULT_SHOWN.every((status) => shown.has(status));
+  return { shown, toggle, isDefault };
+}
 
 function readView(fallback: View): View {
   try {
@@ -73,13 +108,7 @@ export function ProjectView({
   const { meta, setFocus, setLoop } = useProjectMeta(projectId);
   const [view, setView] = useState<View>(() => (compact ? "list" : readView("board")));
   const [query, setQuery] = useState("");
-  const [showCanceled, setShowCanceled] = useState(() => {
-    try {
-      return localStorage.getItem(CANCELED_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
+  const statusFilter = useStatusFilter(projectId);
 
   const visible = useMemo(() => tasks.filter((task) => matches(task, query.trim())), [tasks, query]);
   const groups = useMemo(() => byStatus(visible), [visible]);
@@ -131,17 +160,7 @@ export function ProjectView({
         <div className="bbp-toolbar__actions">
           <LeadLink threadId={meta?.leadThreadId ?? null} threads={threads} />
           <SearchControl query={query} onChange={setQuery} />
-          <FilterMenu
-            showCanceled={showCanceled}
-            onShowCanceled={(value) => {
-              setShowCanceled(value);
-              try {
-                localStorage.setItem(CANCELED_KEY, value ? "1" : "0");
-              } catch {
-                return;
-              }
-            }}
-          />
+          <FilterMenu query={query} onQuery={setQuery} shown={statusFilter.shown} onToggle={statusFilter.toggle} active={!statusFilter.isDefault || query.trim() !== ""} />
           <ProjectMenu focus={meta?.focus ?? null}>
             <FocusCard meta={meta} onSave={setFocus} />
             <LoopCard projectId={projectId} meta={meta} onChange={setLoop} defaultOpen />
@@ -174,9 +193,9 @@ export function ProjectView({
       ) : (
         <div className="bbp-split" data-detail={selected ? "" : undefined}>
           {compact && selected ? null : view === "board" ? (
-            <Board groups={groups} columns={showCanceled ? [...BOARD_COLUMNS, "canceled"] : BOARD_COLUMNS} activeThreads={data.activeThreads} ctx={ctx} move={move} />
+            <Board groups={groups} columns={BOARD_COLUMNS.filter((status) => statusFilter.shown.has(status))} activeThreads={data.activeThreads} ctx={ctx} move={move} />
           ) : (
-            <List groups={groups} order={showCanceled ? [...LIST_ORDER, "canceled"] : LIST_ORDER} activeThreads={data.activeThreads} ctx={ctx} />
+            <List groups={groups} order={LIST_ORDER.filter((status) => statusFilter.shown.has(status))} activeThreads={data.activeThreads} ctx={ctx} />
           )}
           {selected ? (
             <TaskDetail
@@ -230,28 +249,50 @@ function SearchControl({ query, onChange }: { query: string; onChange: (query: s
   );
 }
 
-function FilterMenu({ showCanceled, onShowCanceled }: { showCanceled: boolean; onShowCanceled: (value: boolean) => void }) {
+function FilterMenu({
+  query,
+  onQuery,
+  shown,
+  onToggle,
+  active,
+}: {
+  query: string;
+  onQuery: (query: string) => void;
+  shown: ReadonlySet<Status>;
+  onToggle: (status: Status) => void;
+  active: boolean;
+}) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="bbp-anchor" ref={ref}>
-      <button
-        type="button"
-        className="bbp-toggle"
-        title="Filter"
-        aria-label="Filter"
-        aria-expanded={open}
-        data-active={showCanceled || undefined}
-        onClick={() => setOpen(!open)}
-      >
+      <button type="button" className="bbp-toggle" title="Filter" aria-label="Filter" aria-expanded={open} data-active={active || undefined} onClick={() => setOpen(!open)}>
         <FilterIcon />
       </button>
       {open ? (
-        <div className="bbp-menu" role="menu">
-          <label className="bbp-menu__item bbp-menu__check">
-            <StatusGlyph status="canceled" />
-            <span>Show canceled</span>
-            <input type="checkbox" checked={showCanceled} onChange={(event) => onShowCanceled(event.currentTarget.checked)} />
+        <div className="bbp-menu bbp-filter" role="group" aria-label="Filter tasks">
+          <label className="bbp-filter__search">
+            <Icon name="Search" />
+            <input
+              autoFocus
+              value={query}
+              placeholder="Search..."
+              aria-label="Search tasks"
+              onChange={(event) => onQuery(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                if (query !== "") onQuery("");
+                else setOpen(false);
+              }}
+            />
           </label>
+          <div className="bbp-menu__sep" />
+          {FILTER_ORDER.map((status) => (
+            <label key={status} className="bbp-menu__item bbp-filter__status">
+              <input type="checkbox" checked={shown.has(status)} onChange={() => onToggle(status)} />
+              <StatusGlyph status={status} />
+              <span>{STATUS_LABEL[status]}</span>
+            </label>
+          ))}
         </div>
       ) : null}
     </div>
