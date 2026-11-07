@@ -90,30 +90,31 @@ export function PriorityGlyph({ priority }: { priority: Priority }) {
   );
 }
 
-export function BoardIcon() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="2" y="2.5" width="3.4" height="11" rx="1" />
-      <rect x="6.3" y="2.5" width="3.4" height="7.5" rx="1" />
-      <rect x="10.6" y="2.5" width="3.4" height="9.2" rx="1" />
-    </svg>
-  );
-}
-
-export function ListIcon() {
-  return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <rect x="2" y="3" width="12" height="2" rx="1" />
-      <rect x="2" y="7" width="12" height="2" rx="1" />
-      <rect x="2" y="11" width="12" height="2" rx="1" />
-    </svg>
-  );
-}
-
 export function Dot({ tone }: { tone: "working" | "input" | "failed" | "idle" }) {
   return <span className="bbp-dot" data-tone={tone} aria-hidden="true" />;
 }
 
 export function formatElapsed(fromIso: string | number, now: number): string {
   return shortAge(fromIso, now);
+}
+
+export function ProjectGlyph({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
+      <path d="M8.5 7.5v8" />
+      <path d="M12 7.5v4" />
+      <path d="M15.5 7.5v6" />
+    </svg>
+  );
+}
+
+export function FilterIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true" focusable="false">
+      <path d="M2.5 4.5h11" />
+      <path d="M4.5 8h7" />
+      <path d="M6.5 11.5h3" />
+    </svg>
+  );
 }

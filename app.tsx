@@ -13,20 +13,10 @@ import { ManagerTabs } from "./src/ManagerTabs";
 import { useProjects } from "./src/data";
 import type { Project } from "./src/contracts";
 import { projectsContract } from "./src/meta";
+import { ProjectGlyph } from "./src/glyphs";
 
 const PROJECT_ICON = "bb-projects:project";
 const PROJECT_TAB = { id: "manager-project", context: { kind: "thread" }, availability: "fixed" } as const;
-
-function ProjectIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
-      <path d="M8.5 7.5v8" />
-      <path d="M12 7.5v4" />
-      <path d="M15.5 7.5v6" />
-    </svg>
-  );
-}
 
 function useManagedProject(threadId: string): { project: Project | null; projects: Project[] } {
   const { projects } = useProjects();
@@ -107,7 +97,7 @@ function useProjectTabVisible({ threadId }: ExperimentalThreadTabProps): boolean
 }
 
 export default definePluginApp((app) => {
-  app.experimental_icons.register({ name: PROJECT_ICON, component: ProjectIcon });
+  app.experimental_icons.register({ name: PROJECT_ICON, component: ProjectGlyph });
   app.slots.navPanel({
     id: "projects",
     title: "Projects",

@@ -63,9 +63,19 @@ function Notes({ projectId }: { projectId: string }) {
   );
 }
 
-export function LoopCard({ projectId, meta, onChange }: { projectId: string; meta: ProjectMeta | null; onChange: (change: LoopChange) => Promise<unknown> }) {
+export function LoopCard({
+  projectId,
+  meta,
+  onChange,
+  defaultOpen = false,
+}: {
+  projectId: string;
+  meta: ProjectMeta | null;
+  onChange: (change: LoopChange) => Promise<unknown>;
+  defaultOpen?: boolean;
+}) {
   const inbox = experimental_useRpcQuery({ contract: projectsContract, method: "listInbox", input: { projectId } });
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   if (meta === null || !meta.leadThreadId) return null;
   const items = inbox.data?.items ?? [];
   const now = Date.now();

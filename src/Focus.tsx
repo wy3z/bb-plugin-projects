@@ -25,10 +25,18 @@ export function LeadLink({ threadId, threads }: { threadId: string | null; threa
   const navigate = useBbNavigate();
   if (!threadId) return null;
   const lead = threads.get(threadId);
+  const tone = lead?.needsInput ? "input" : lead?.working ? "working" : "idle";
+  const state = tone === "input" ? "needs input" : tone === "working" ? "working" : "idle";
   return (
-    <button type="button" className="bbp-lead" title="Open the project lead" onClick={() => navigate.toThread(threadId)}>
-      {lead?.working ? <span className="bbp-dot" data-tone="working" aria-hidden="true" /> : null}
-      <span>Lead: {lead?.title ?? threadId}</span>
+    <button
+      type="button"
+      className="bbp-lead"
+      data-tone={tone}
+      title={`Open the project lead (${state})${lead?.title ? `: ${lead.title}` : ""}`}
+      onClick={(event) => navigate.toThread(threadId, event.ctrlKey || event.metaKey ? { split: true } : undefined)}
+    >
+      <span className="bbp-dot" data-tone={tone} aria-hidden="true" />
+      <span>Lead</span>
     </button>
   );
 }

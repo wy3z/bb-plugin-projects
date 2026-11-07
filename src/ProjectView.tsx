@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { experimental_Icon as Icon } from "@get-bb/plugin-sdk/app";
 import type { Project, Status, Task } from "./contracts";
 import { TaskCard, type CardContext } from "./Card";
 import { byStatus, useBoardMoves, useNow, usePresets, useProjectData, useThreadIndex, type MoveTask } from "./data";
-import { BoardIcon, ListIcon, STATUS_LABEL, StatusGlyph } from "./glyphs";
+import { FilterIcon, ProjectGlyph, STATUS_LABEL, StatusGlyph } from "./glyphs";
 import { FocusCard, LeadLink, useProjectMeta } from "./Focus";
 import { LoopCard } from "./Loop";
 import { TaskDetail } from "./TaskDetail";
+import { usePopover } from "./usePopover";
 
 type View = "board" | "list";
 
@@ -93,8 +94,6 @@ export function ProjectView({
     selectedId,
     onSelect: (task) => setSelectedId((current) => (current === task.id ? null : task.id)),
   };
-  const active = tasks.filter((task) => task.status === "in_progress").length;
-  const review = tasks.filter((task) => task.status === "in_review").length;
 
   const changeView = (next: View) => {
     setView(next);
@@ -111,6 +110,9 @@ export function ProjectView({
     <div className="bbp-project" data-compact={compact || undefined}>
       <div className="bbp-toolbar">
         <div className="bbp-toolbar__title">
+          <span className="bbp-toolbar__icon" aria-hidden="true">
+            <ProjectGlyph />
+          </span>
           {projects.length > 1 && onProjectChange ? (
             <label className="bbp-select">
               <select value={projectId} onChange={(event) => onProjectChange(event.currentTarget.value)} aria-label="Project">
@@ -125,54 +127,35 @@ export function ProjectView({
           ) : (
             <span className="bbp-toolbar__name">{project?.name ?? "Project"}</span>
           )}
-          <span className="bbp-toolbar__meta">
-            {active} in progress · {review} for review
-          </span>
-          <LeadLink threadId={meta?.leadThreadId ?? null} threads={threads} />
         </div>
         <div className="bbp-toolbar__actions">
-          <label className="bbp-search">
-            <Icon name="Search" />
-            <input
-              value={query}
-              placeholder="Filter"
-              aria-label="Filter tasks"
-              onChange={(event) => setQuery(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") setQuery("");
-              }}
-            />
-          </label>
-          <button
-            type="button"
-            className="bbp-toggle"
-            aria-pressed={showCanceled}
-            title="Show canceled"
-            onClick={() => {
-              setShowCanceled((value) => {
-                try {
-                  localStorage.setItem(CANCELED_KEY, value ? "0" : "1");
-                } catch {
-                  return !value;
-                }
-                return !value;
-              });
+          <LeadLink threadId={meta?.leadThreadId ?? null} threads={threads} />
+          <SearchControl query={query} onChange={setQuery} />
+          <FilterMenu
+            showCanceled={showCanceled}
+            onShowCanceled={(value) => {
+              setShowCanceled(value);
+              try {
+                localStorage.setItem(CANCELED_KEY, value ? "1" : "0");
+              } catch {
+                return;
+              }
             }}
-          >
-            <Icon name="Eye" />
-          </button>
+          />
+          <ProjectMenu focus={meta?.focus ?? null}>
+            <FocusCard meta={meta} onSave={setFocus} />
+            <LoopCard projectId={projectId} meta={meta} onChange={setLoop} defaultOpen />
+          </ProjectMenu>
           <div className="bbp-segmented" role="radiogroup" aria-label="View">
-            <button type="button" role="radio" aria-checked={view === "board"} title="Board" onClick={() => changeView("board")}>
-              <BoardIcon />
+            <button type="button" role="radio" aria-checked={view === "list"} onClick={() => changeView("list")}>
+              List
             </button>
-            <button type="button" role="radio" aria-checked={view === "list"} title="List" onClick={() => changeView("list")}>
-              <ListIcon />
+            <button type="button" role="radio" aria-checked={view === "board"} onClick={() => changeView("board")}>
+              Board
             </button>
           </div>
         </div>
       </div>
-      <FocusCard meta={meta} onSave={setFocus} />
-      <LoopCard projectId={projectId} meta={meta} onChange={setLoop} />
       {error ? (
         <div className="bbp-error" role="alert">
           <Icon name="AlertTriangle" />
@@ -207,6 +190,90 @@ export function ProjectView({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+function SearchControl({ query, onChange }: { query: string; onChange: (query: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const shown = open || query !== "";
+  useEffect(() => {
+    if (open) input.current?.focus();
+  }, [open]);
+  if (!shown) {
+    return (
+      <button type="button" className="bbp-toggle" title="Search tasks" aria-label="Search tasks" onClick={() => setOpen(true)}>
+        <Icon name="Search" />
+      </button>
+    );
+  }
+  return (
+    <label className="bbp-search">
+      <Icon name="Search" />
+      <input
+        ref={input}
+        value={query}
+        placeholder="Search tasks"
+        aria-label="Search tasks"
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onBlur={() => {
+          if (query === "") setOpen(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          onChange("");
+          setOpen(false);
+        }}
+      />
+    </label>
+  );
+}
+
+function FilterMenu({ showCanceled, onShowCanceled }: { showCanceled: boolean; onShowCanceled: (value: boolean) => void }) {
+  const { open, setOpen, ref } = usePopover();
+  return (
+    <div className="bbp-anchor" ref={ref}>
+      <button
+        type="button"
+        className="bbp-toggle"
+        title="Filter"
+        aria-label="Filter"
+        aria-expanded={open}
+        data-active={showCanceled || undefined}
+        onClick={() => setOpen(!open)}
+      >
+        <FilterIcon />
+      </button>
+      {open ? (
+        <div className="bbp-menu" role="menu">
+          <label className="bbp-menu__item bbp-menu__check">
+            <StatusGlyph status="canceled" />
+            <span>Show canceled</span>
+            <input type="checkbox" checked={showCanceled} onChange={(event) => onShowCanceled(event.currentTarget.checked)} />
+          </label>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ProjectMenu({ focus, children }: { focus: string | null; children: ReactNode }) {
+  const { open, setOpen, ref } = usePopover();
+  return (
+    <div className="bbp-anchor" ref={ref}>
+      <button
+        type="button"
+        className="bbp-toggle"
+        title={focus ? `Focus: ${focus}` : "Focus, loop and memory"}
+        aria-label="Focus, loop and memory"
+        aria-expanded={open}
+        aria-pressed={open}
+        onClick={() => setOpen(!open)}
+      >
+        <Icon name="Target" />
+      </button>
+      {open ? <div className="bbp-popover">{children}</div> : null}
     </div>
   );
 }
@@ -343,7 +410,7 @@ function List({
   activeThreads: ReturnType<typeof useProjectData>["activeThreads"];
   ctx: CardContext;
 }) {
-  const [collapsed, setCollapsed] = useState<ReadonlySet<Status>>(() => new Set<Status>(["done", "backlog", "canceled"]));
+  const [collapsed, setCollapsed] = useState<ReadonlySet<Status>>(() => new Set<Status>(["backlog", "canceled"]));
   return (
     <div className="bbp-list">
       {order.map((status) => {
