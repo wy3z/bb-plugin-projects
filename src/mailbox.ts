@@ -88,6 +88,7 @@ export const MIGRATIONS = [
   UPDATE replies SET audience = (SELECT source FROM requests WHERE requests.id = replies.in_reply_to) WHERE in_reply_to IS NOT NULL;
   INSERT OR IGNORE INTO consumers (project_id, name, first_seen, last_seen) SELECT project_id, source, 0, MAX(created_at) FROM requests GROUP BY project_id, source;
   INSERT OR IGNORE INTO reply_acks (reply_id, consumer, acked_at) SELECT r.id, c.name, r.acked_at FROM replies r JOIN consumers c ON c.project_id = r.project_id WHERE r.acked_at IS NOT NULL AND (r.audience IS NULL OR r.audience = c.name);`,
+  `ALTER TABLE requests ADD COLUMN redelivery INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export const CONSUMER_MAX = 40;
@@ -137,6 +138,7 @@ export type Request = {
   checkedAt: number | null;
   checkMisses: number;
   failedAt: number | null;
+  redelivery: boolean;
 };
 
 export type Reply = {
@@ -198,6 +200,7 @@ function toRequest(row: Row): Request {
     checkedAt: numOrNull(row.checked_at),
     checkMisses: num(row.check_misses ?? 0),
     failedAt: numOrNull(row.failed_at),
+    redelivery: Boolean(num(row.redelivery ?? 0)),
   };
 }
 
@@ -472,9 +475,9 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
       if (row.state !== "failed" && row.state !== "held" && row.state !== "pending") return { outcome: "not-retryable" as const, request: row };
       db()
         .prepare(
-          "UPDATE requests SET state = 'pending', failures = 0, check_misses = 0, failed_at = NULL, delivery = NULL, delivered_at = NULL, confirmed_at = NULL, checked_at = NULL, next_attempt_at = ?, generation = generation + 1, last_error = NULL, target_thread_id = CASE WHEN ? THEN NULL ELSE target_thread_id END WHERE id = ?",
+          "UPDATE requests SET state = 'pending', failures = 0, check_misses = 0, failed_at = NULL, delivery = NULL, delivered_at = NULL, confirmed_at = NULL, checked_at = NULL, next_attempt_at = ?, generation = generation + 1, last_error = NULL, redelivery = CASE WHEN ? THEN 1 ELSE redelivery END, target_thread_id = CASE WHEN ? THEN NULL ELSE target_thread_id END WHERE id = ?",
         )
-        .run(clock(), resend ? 1 : 0, id);
+        .run(clock(), resend ? 1 : 0, resend ? 1 : 0, id);
       return { outcome: "requeued" as const, request: getRequest(id) };
     })();
   }
@@ -499,6 +502,10 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
       );
       return { requests, replies };
     })();
+  }
+
+  function markRedelivery(id: string): void {
+    db().prepare("UPDATE requests SET redelivery = 1 WHERE id = ? AND redelivery = 0").run(id);
   }
 
   function markHeld(id: string, reason: string): boolean {
@@ -709,6 +716,7 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     prune,
     unconfirmedCount,
     markHeld,
+    markRedelivery,
     requeue,
     extendLease,
     releaseHeld,

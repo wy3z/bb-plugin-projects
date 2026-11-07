@@ -53,7 +53,7 @@ export function world(db: SqlDb, clock: Clock) {
   const sent: Sent[] = [];
   const wakes: WakeBody[] = [];
   const logs: string[] = [];
-  const faults = { send: 0, leadOf: 0, probe: 0, wake: 0, drop: 0, sendHangs: null as null | Promise<void>, shape: null as null | "search" | "queue", captured: false, dropDispatches: 0 };
+  const faults = { send: 0, leadOf: 0, probe: 0, wake: 0, drop: 0, sendHangs: null as null | Promise<void>, shape: null as null | "search" | "queue", captured: false, dropDispatches: 0, leadState: 0 };
   let transportOn = true;
   let queuedSeq = 0;
 
@@ -66,6 +66,7 @@ export function world(db: SqlDb, clock: Clock) {
 
   const probeApi: ProbeApi = {
     queued: async (threadId) => {
+      if ((threads.get(threadId) ?? "missing") === "missing") throw new Error(`HTTP 404: thread ${threadId} not found`);
       if (faults.probe > 0) {
         faults.probe--;
         throw new Error("queue list unavailable");
@@ -100,7 +101,13 @@ export function world(db: SqlDb, clock: Clock) {
       }
       return leads.get(projectId) ?? null;
     },
-    leadState: async (threadId) => threads.get(threadId) ?? "missing",
+    leadState: async (threadId) => {
+      if (faults.leadState > 0) {
+        faults.leadState--;
+        throw new Error("threads.list failed");
+      }
+      return threads.get(threadId) ?? "missing";
+    },
     sendToThread: async (threadId, text) => {
       if (faults.sendHangs) await faults.sendHangs;
       if (faults.send > 0) {

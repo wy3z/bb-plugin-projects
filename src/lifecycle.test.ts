@@ -143,6 +143,71 @@ describe("queued deliveries are confirmed, not assumed", () => {
     const resent = await w.courier.retry(pixel.projectId, request.id, true);
     expect(resent.request).toMatchObject({ state: "delivered", targetThreadId: "thr_lead2" });
     expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead2"]);
+    expect(w.sent[0]!.text).toContain(`Redelivery: if you already have request ${request.id}, do not act on it twice.`);
+  });
+
+  it("a resent request keeps its Redelivery warning across a failed send and a restart", async () => {
+    const path = tempDbPath();
+    const clock = new Clock();
+    const w = world(openDb(path), clock);
+    const { request } = w.mailbox.enqueue(ask("resend across restart"));
+    w.mailbox.claim(request.id);
+    w.mailbox.setTarget(request.id, "thr_lead1");
+    w.threads.set("thr_lead1", "hidden");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+    clock.advance(LEASE_MS + 1);
+    await w.courier.tick();
+    w.faults.leadOf = 1;
+    expect((await w.courier.retry(pixel.projectId, request.id, true)).request).toMatchObject({ state: "pending", targetThreadId: null });
+    expect(w.mailbox.getRequest(request.id)!.redelivery).toBe(true);
+
+    const restarted = world(openDb(path), clock);
+    restarted.leads.set(pixel.projectId, "thr_lead3");
+    restarted.threads.set("thr_lead3", "ok");
+    clock.advance(backoffMs(MAX_FAILURES));
+    await restarted.courier.tick();
+    expect(restarted.sent.map((item) => item.threadId)).toEqual(["thr_lead3"]);
+    expect(restarted.sent[0]!.text).toContain(`Redelivery: if you already have request ${request.id}, do not act on it twice.`);
+  });
+
+  it("an interrupted delivery whose target was deleted goes to the current lead without probing the deleted thread", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    const { request } = w.mailbox.enqueue(ask("target deleted"));
+    w.mailbox.claim(request.id);
+    w.mailbox.setTarget(request.id, "thr_lead1");
+    w.threads.delete("thr_lead1");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+    w.faults.leadState = 1;
+    clock.advance(LEASE_MS + 1);
+    await w.courier.tick();
+    expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "pending", failures: 1 });
+    expect(w.sent).toHaveLength(0);
+    clock.advance(backoffMs(MAX_FAILURES));
+    await w.courier.tick();
+    expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", targetThreadId: "thr_lead2", failures: 0 });
+    expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead2"]);
+    expect(w.sent[0]!.text).toContain("Redelivery");
+    expect(w.mailbox.listReplies({}).filter((reply) => reply.kind === "failure")).toEqual([]);
+  });
+
+  it("a copy queued on a lead that is then deleted is delivered to the current lead", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    w.busy.add("thr_lead1");
+    const { request } = w.mailbox.enqueue(ask("queued then deleted"));
+    await w.courier.deliver(request.id);
+    w.threads.delete("thr_lead1");
+    w.queues.delete("thr_lead1");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+    clock.advance(CHECK_EVERY_MS);
+    await w.courier.tick();
+    expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", targetThreadId: "thr_lead2" });
+    expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead1", "thr_lead2"]);
+    expect(w.mailbox.listReplies({}).filter((reply) => reply.kind === "failure")).toEqual([]);
   });
 
   it("a queued copy BB gave up on is reported as failed, then an explicit retry replaces it once", async () => {

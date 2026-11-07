@@ -106,6 +106,7 @@ export function fakeBb(opts: { dbPath?: string; kv?: Map<string, unknown>; setti
         queuedMessages: { list: async () => [], delete: async () => ({}) },
         search: async ({ query }: { query: string }) => {
           const results = [...threads.keys()]
+            .filter((id) => threads.get(id)!.visibility !== "hidden")
             .map((id) => ({
               thread: { id },
               matches: sent

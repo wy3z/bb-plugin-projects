@@ -113,6 +113,24 @@ describe("Grok Bot to project PM and back", () => {
     expect(fake.sent).toHaveLength(1);
   });
 
+  it("an interrupted delivery to a lead that is now hidden and archived is held, not sent twice", async () => {
+    for (const hidden of [true, false]) {
+      const fake = boot();
+      fake.addThread("thr_lead1");
+      fake.addThread("thr_lead2");
+      await fake.run(["lead", "PIXEL"], "thr_lead1");
+      const request = (await fake.run(["send", "PIXEL", "landed", "once", "--as", "grok-bot", "--json"])).json();
+      expect(fake.sent.map((item) => item.threadId)).toEqual(["thr_lead1"]);
+      fake.db.prepare("UPDATE requests SET state = 'delivering', delivery = NULL, delivered_at = NULL, confirmed_at = NULL, lease_until = 0 WHERE id = ?").run(request.id);
+      fake.threads.set("thr_lead1", { ...fake.threads.get("thr_lead1")!, archivedAt: Date.now(), ...(hidden ? { visibility: "hidden" as const } : {}) });
+      await fake.run(["lead", "PIXEL"], "thr_lead2");
+      await runService(fake, "pm-mailbox");
+      expect(fake.sent.map((item) => item.threadId)).toEqual(["thr_lead1"]);
+      const [row] = (await fake.run(["requests", "PIXEL", "--json"])).json().requests;
+      expect(row).toMatchObject(hidden ? { state: "held" } : { state: "delivered", delivery: "recovered", deliveredTo: "thr_lead1" });
+    }
+  });
+
   it("a lead cannot answer another project's request", async () => {
     const fake = boot();
     fake.addThread("thr_lead1");

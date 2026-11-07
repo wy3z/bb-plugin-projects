@@ -46,9 +46,9 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
 
   async function leadState(threadId: string): Promise<LeadState> {
     const [thread] = await bb.sdk.threads.list({ threadIds: [threadId], includeHidden: true });
-    if (!thread) return "missing";
-    if (thread.archivedAt !== null && thread.archivedAt !== undefined) return "archived";
-    return (thread as { visibility?: string }).visibility === "hidden" ? "hidden" : "ok";
+    if (!thread || (thread as { deletedAt?: number | null }).deletedAt) return "missing";
+    if ((thread as { visibility?: string }).visibility === "hidden") return "hidden";
+    return thread.archivedAt !== null && thread.archivedAt !== undefined ? "archived" : "ok";
   }
 
   const probeApi = {

@@ -92,56 +92,55 @@ export function createCourier(deps: CourierDeps) {
     if (!request) return mailbox.getRequest(id);
     inFlight.add(id);
     try {
-      let redelivery = false;
+      let redelivery = request.redelivery;
       if (request.targetThreadId) {
-        let seen: Sighting;
-        let targetState: LeadState;
+        let original: LeadState;
         try {
-          seen = await deps.sight(request.targetThreadId, request.id);
-          targetState = seen.kind === "queued" ? await deps.leadState(request.targetThreadId) : "ok";
+          original = await deps.leadState(request.targetThreadId);
         } catch (cause) {
-          retryOrFail(id, request.prefix, `could not check an earlier attempt: ${why(cause)}`);
+          retryOrFail(id, request.prefix, `could not check the earlier target: ${why(cause)}`);
           return mailbox.getRequest(id);
         }
-        if (seen.kind === "landed") {
-          mailbox.markDelivered(id, "recovered");
-          return mailbox.getRequest(id);
-        }
-        if (seen.kind === "queued" && targetState === "ok") {
-          mailbox.markDelivered(id, "queued");
-          return mailbox.getRequest(id);
-        }
-        if (seen.kind === "queued" || seen.kind === "stranded") {
-          const failed = await drop(request.targetThreadId, seen.queuedId, request.id);
-          let after: Sighting;
+        if (original !== "missing") {
+          let seen: Sighting;
           try {
-            after = await deps.sight(request.targetThreadId, request.id);
+            seen = await deps.sight(request.targetThreadId, request.id);
           } catch (cause) {
-            retryOrFail(id, request.prefix, `could not check the stale copy after removing it: ${why(cause)}`);
+            retryOrFail(id, request.prefix, `could not check an earlier attempt: ${why(cause)}`);
             return mailbox.getRequest(id);
           }
-          if (after.kind === "landed") {
+          if (seen.kind === "landed") {
             mailbox.markDelivered(id, "recovered");
             return mailbox.getRequest(id);
           }
-          if (failed || after.kind !== "absent") {
-            retryOrFail(id, request.prefix, `the stale copy in ${request.targetThreadId}'s queue could not be removed${failed ? `: ${failed}` : ""}; not sending it again until it is`);
+          if (seen.kind === "queued" && original === "ok") {
+            mailbox.markDelivered(id, "queued");
             return mailbox.getRequest(id);
           }
-        } else {
-          let original: LeadState;
-          try {
-            original = await deps.leadState(request.targetThreadId);
-          } catch (cause) {
-            retryOrFail(id, request.prefix, `could not check the earlier target: ${why(cause)}`);
-            return mailbox.getRequest(id);
-          }
-          if (original === "hidden") {
+          if (seen.kind === "queued" || seen.kind === "stranded") {
+            const failed = await drop(request.targetThreadId, seen.queuedId, request.id);
+            let after: Sighting;
+            try {
+              after = await deps.sight(request.targetThreadId, request.id);
+            } catch (cause) {
+              retryOrFail(id, request.prefix, `could not check the stale copy after removing it: ${why(cause)}`);
+              return mailbox.getRequest(id);
+            }
+            if (after.kind === "landed") {
+              mailbox.markDelivered(id, "recovered");
+              return mailbox.getRequest(id);
+            }
+            if (failed || after.kind !== "absent") {
+              retryOrFail(id, request.prefix, `the stale copy in ${request.targetThreadId}'s queue could not be removed${failed ? `: ${failed}` : ""}; not sending it again until it is`);
+              return mailbox.getRequest(id);
+            }
+          } else if (original === "hidden") {
             hold(request, "target-hidden", request.targetThreadId);
             return mailbox.getRequest(id);
           }
         }
         redelivery = true;
+        mailbox.markRedelivery(id);
       }
       let lead: string | null;
       let state: LeadState;
@@ -180,8 +179,15 @@ export function createCourier(deps: CourierDeps) {
       let seen: Sighting;
       let targetState: LeadState;
       try {
-        seen = await deps.sight(target, request.id);
         targetState = await deps.leadState(target);
+        if (targetState === "missing") {
+          if (mailbox.reopen(request.id, `the lead thread ${target} was deleted while the request was still queued there`)) {
+            log.info(`Request ${request.id} was queued on ${target}, which was deleted; delivering it to the current lead.`);
+          }
+          deps.changed?.(request.projectId);
+          continue;
+        }
+        seen = await deps.sight(target, request.id);
       } catch (cause) {
         if (mailbox.checkFailed(request.id, why(cause)) === "failed") log.warn(`Request ${request.id} for ${request.prefix} could not be confirmed and was reported: ${why(cause)}`);
         deps.changed?.(request.projectId);
