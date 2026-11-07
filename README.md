@@ -14,6 +14,10 @@ live cards, and a project lead workflow.
   the attached agent's state (a flat blue dot and "Working · preset · 12m",
   "Needs input", "Worked · 2 agents"), the agent worktree's changes (+A −D,
   click to open the agent in a split), and its pull requests with status icons.
+  With Pull Requests installed, a PR chip opens the pull request in BB: the
+  thread's side panel when the board is in one, otherwise the full-page view.
+  Ctrl, Cmd, Shift or middle-click opens GitHub, as does any click when Pull
+  Requests is not installed.
 - **Card menu**: delegate to any Tasks preset, Apply locally (the worker's
   worktree into the project checkout), Create PR, Open in Tasks. Apply and
   Create PR call the Agent Pills plugin's git actions, so that plugin must be
