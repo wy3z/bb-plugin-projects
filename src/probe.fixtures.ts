@@ -4,6 +4,7 @@ type SearchResult = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["search"]>>
 type QueueResult = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["queuedMessages"]["list"]>>;
 type QueuedRow = QueueResult[number];
 type SearchThread = SearchResult["active"]["results"][number]["thread"];
+type EventsResult = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>;
 
 export const capturedThread = {
   id: "thr_lead1",
@@ -28,7 +29,7 @@ export const capturedThread = {
   latestAttentionAt: 1794000000000,
   createdAt: 1794000000000,
   updatedAt: 1794000000000,
-  activity: { activeBackgroundAgentCount: 0, activeBackgroundCommandCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 },
+  activity: { activeBackgroundAgentCount: 0, activeBackgroundCommandCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 },
   queuedWork: "none",
   pinSortKey: null,
   environmentBranchName: "main",
@@ -48,24 +49,24 @@ const typedThread = (id: string, archivedAt: number | null = null): SearchThread
   archivedAt,
 });
 
-export function typedSearch(hits: { threadId: string; archived?: boolean; text: string }[]): SearchResult {
+export function typedSearch(hits: { threadId: string; archived?: boolean; text: string; seq?: number; kind?: "user_message" | "assistant_message" }[]): SearchResult {
   const group = (archived: boolean) => {
     const results = hits
       .filter((hit) => Boolean(hit.archived) === archived)
       .map((hit) => ({
         thread: typedThread(hit.threadId, archived ? 1794000000000 : null),
-        matches: [{ sourceKind: "user_message" as const, sourceSeq: 12, text: hit.text, highlightRanges: [{ start: 9, end: 29 }] }],
+        matches: [{ sourceKind: hit.kind ?? ("user_message" as const), sourceSeq: hit.seq ?? 12, text: hit.text, highlightRanges: [{ start: 9, end: 29 }] }],
       }));
     return { total: results.length, results };
   };
   return { active: group(false), archived: group(true) };
 }
 
-export function capturedSearch(threadId: string, text: string): unknown {
+export function capturedSearch(threadId: string, text: string, sourceKind = "assistant_message", sourceSeq = 1370): unknown {
   return {
     active: {
       total: 1,
-      results: [{ thread: { ...capturedThread, id: threadId }, matches: [{ highlightRanges: [{ start: 9, end: 16 }], sourceKind: "assistant_message", sourceSeq: 1370, text }] }],
+      results: [{ thread: { ...capturedThread, id: threadId }, matches: [{ highlightRanges: [{ start: 9, end: 16 }], sourceKind, sourceSeq, text }] }],
     },
     archived: { total: 0, results: [] },
   };
@@ -95,4 +96,30 @@ export function typedQueued(threadId: string, rows: { id: string; text: string; 
     updatedAt: 1794000000000,
     waitingOn: row.waitingOn ?? null,
   }));
+}
+
+export function typedRelayEvent(threadId: string, seq: number, text: string, senderThreadId: string | null = null): EventsResult {
+  return [
+    {
+      id: `evt_${seq}`,
+      scope: { kind: "thread" },
+      threadId,
+      seq,
+      createdAt: 1794042959805,
+      type: "client/turn/requested",
+      data: {
+        direction: "outbound",
+        requestId: "creq_632246xiie",
+        source: "tell",
+        initiator: "user",
+        senderThreadId,
+        systemMessageKind: "unlabeled",
+        systemMessageSubject: null,
+        input: [{ type: "text", text, mentions: [] }],
+        target: { kind: "new-turn" },
+        request: { method: "turn/start", params: {} },
+        execution: { model: "claude-opus-5-5", serviceTier: "default", reasoningLevel: "medium", permissionMode: "full", source: "client/turn/requested" },
+      },
+    },
+  ] satisfies EventsResult;
 }

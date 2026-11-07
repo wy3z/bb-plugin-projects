@@ -131,7 +131,7 @@ describe("requests to the lead", () => {
 
     const db = openDb(path);
     const restarted = world(db, clock);
-    restarted.landedIn("thr_lead1", `[Outer loop · grok-bot] PIXEL\nRequest ${request.id}.`);
+    restarted.landedIn("thr_lead1", `[Outer loop · grok-bot] PIXEL\nRequest ${request.id} from grok-bot.`);
     await restarted.courier.tick();
     expect(restarted.mailbox.getRequest(request.id)!.state).toBe("delivering");
     clock.advance(5 * 60_000 + 1);

@@ -290,6 +290,42 @@ describe("any agent system", () => {
     expect((await fake.run(["requests", "PIXEL", "--as", "dots", "--json"])).json().requests.map((request: { id: string }) => request.id)).toEqual([fromDots.id]);
   });
 
+  it("identical news for two different agents is two replies, and each agent gets its own", async () => {
+    const fake = boot();
+    fake.addThread("thr_lead1");
+    await fake.run(["lead", "PIXEL"], "thr_lead1");
+    await fake.run(["send", "PIXEL", "hello", "--as", "grok-bot"]);
+    await fake.run(["send", "PIXEL", "hi", "--as", "dots"]);
+    const forGrok = (await fake.run(["reply", "PIXEL", "rotate", "the", "key", "--for", "grok-bot", "--json"], "thr_lead1")).json();
+    const forDots = (await fake.run(["reply", "PIXEL", "rotate", "the", "key", "--for", "dots", "--json"], "thr_lead1")).json();
+    expect(forDots.id).not.toBe(forGrok.id);
+    expect(forDots).toMatchObject({ audience: "dots", duplicate: false });
+    expect((await fake.run(["reply", "PIXEL", "rotate", "the", "key", "--for", "dots", "--json"], "thr_lead1")).json()).toMatchObject({ id: forDots.id, duplicate: true });
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "dots", "--json"]))).toEqual([forDots.id]);
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "grok-bot", "--json"]))).toEqual([forGrok.id]);
+  });
+
+  it("a lead that handed over can still answer requests that were delivered to it, but nothing else", async () => {
+    const fake = boot();
+    fake.addThread("thr_lead1");
+    fake.addThread("thr_lead2");
+    fake.addThread("thr_worker", { parentThreadId: "thr_lead1" });
+    await fake.run(["lead", "PIXEL"], "thr_lead1");
+    const mine = (await fake.run(["send", "PIXEL", "old", "work", "--as", "grok-bot", "--json"])).json();
+    expect(mine.deliveredTo).toBe("thr_lead1");
+    await fake.run(["lead", "PIXEL"], "thr_lead2");
+    const theirs = (await fake.run(["send", "PIXEL", "new", "work", "--as", "grok-bot", "--json"])).json();
+    expect(theirs.deliveredTo).toBe("thr_lead2");
+
+    const answered = await fake.run(["reply", "PIXEL", "done", "--to", mine.id, "--json"], "thr_lead1");
+    expect(answered.exitCode).toBe(0);
+    expect(answered.json()).toMatchObject({ inReplyTo: mine.id, leadThreadId: "thr_lead1", author: "thr_lead1", audience: "grok-bot" });
+    expect((await fake.run(["reply", "PIXEL", "not", "mine", "--to", theirs.id], "thr_lead1")).exitCode).not.toBe(0);
+    expect((await fake.run(["reply", "PIXEL", "news"], "thr_lead1")).exitCode).not.toBe(0);
+    expect((await fake.run(["reply", "PIXEL", "done", "--to", mine.id], "thr_worker")).exitCode).not.toBe(0);
+    expect((await fake.run(["reply", "PIXEL", "also", "--to", mine.id], "thr_lead2")).exitCode).toBe(0);
+  });
+
   it("an agent that only reads follows from then on, and a mistyped name can be forgotten", async () => {
     const fake = boot();
     fake.addThread("thr_lead1");

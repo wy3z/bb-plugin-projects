@@ -106,9 +106,25 @@ export function fakeBb(opts: { dbPath?: string; kv?: Map<string, unknown>; setti
         queuedMessages: { list: async () => [], delete: async () => ({}) },
         search: async ({ query }: { query: string }) => {
           const results = [...threads.keys()]
-            .map((id) => ({ thread: { id }, matches: sent.filter((item) => item.threadId === id && item.text.includes(query)).slice(0, 1).map((item) => ({ sourceKind: "user_message", text: item.text.slice(0, 160) })) }))
+            .map((id) => ({
+              thread: { id },
+              matches: sent
+                .map((item, index) => ({ item, seq: index + 1 }))
+                .filter(({ item }) => item.threadId === id && item.text.includes(query))
+                .slice(0, 1)
+                .map(({ item, seq }) => ({ sourceKind: "user_message", sourceSeq: seq, text: item.text.slice(0, 160) })),
+            }))
             .filter((result) => result.matches.length);
           return { active: { total: results.length, results }, archived: { total: 0, results: [] } };
+        },
+        events: {
+          list: async ({ threadId, afterSeq }: { threadId: string; afterSeq: string }) => {
+            const seq = Number(afterSeq) + 1;
+            const item = sent[seq - 1];
+            return item && item.threadId === threadId
+              ? [{ seq, type: "client/turn/requested", data: { senderThreadId: null, input: [{ type: "text", text: item.text, mentions: [] }] } }]
+              : [];
+          },
         },
       },
     },

@@ -54,6 +54,7 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
   const probeApi = {
     queued: (threadId: string) => bb.sdk.threads.queuedMessages.list({ threadId }) as Promise<unknown>,
     search: (query: string, limitPerGroup: string) => bb.sdk.threads.search({ query, limitPerGroup }) as Promise<unknown>,
+    event: (threadId: string, seq: number) => bb.sdk.threads.events.list({ threadId, afterSeq: String(seq - 1), limit: "1", order: "asc" }) as Promise<unknown>,
   };
 
   const courier = createCourier({
@@ -248,18 +249,23 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       async run(input, ctx) {
         const project = await deps.resolveProject(input.positionals.project);
         const meta = await deps.readMeta(project.id);
-        if (!meta.leadThreadId) throw new PluginCliError(`${project.prefix} has no project lead.`);
-        if (!ctx.threadId || ctx.threadId !== meta.leadThreadId) {
-          throw new PluginCliError(`Only the ${project.prefix} lead (${meta.leadThreadId}) can reply to the outer loop. Workers report to their lead instead.`);
+        const to = input.options.to?.trim() || null;
+        const request = to ? mailbox.getRequest(to) : null;
+        if (to && (!request || request.projectId !== project.id)) throw new PluginCliError(`No ${project.prefix} request ${to}. See bb projects requests ${project.prefix}.`);
+        const isLead = Boolean(ctx.threadId && meta.leadThreadId && ctx.threadId === meta.leadThreadId);
+        const isRecipient = Boolean(ctx.threadId && request?.targetThreadId === ctx.threadId && request.deliveredAt !== null);
+        if (!isLead && !isRecipient) {
+          if (!meta.leadThreadId) throw new PluginCliError(`${project.prefix} has no project lead.`);
+          throw new PluginCliError(
+            `Only the ${project.prefix} lead (${meta.leadThreadId}), or the thread a request was delivered to answering that request with --to, can reply to the outer loop. Workers report to their lead instead.`,
+          );
         }
+        const author = ctx.threadId!;
         const text = (input.positionals.message ?? []).join(" ").trim();
         if (!text) throw new PluginCliError("Say what the sender needs to know.");
         if (text.length > REPLY_TEXT_MAX) throw new PluginCliError(`Replies are limited to ${REPLY_TEXT_MAX} characters.`);
-        const to = input.options.to?.trim() || null;
         const audience = consumerOption(input.options.for, false);
-        if (to) {
-          const request = mailbox.getRequest(to);
-          if (!request || request.projectId !== project.id) throw new PluginCliError(`No ${project.prefix} request ${to}. See bb projects requests ${project.prefix}.`);
+        if (to && request) {
           if (audience && audience !== request.source) throw new PluginCliError(`Request ${to} came from ${request.source}; a reply to it goes to ${request.source}. Drop --for.`);
         } else if (audience && !mailbox.hasConsumer(project.id, audience)) {
           throw new PluginCliError(`No agent called ${audience} follows ${project.prefix}. See bb projects consumers ${project.prefix}.`);
@@ -273,11 +279,11 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         const { reply, duplicate } = mailbox.addReply({
           projectId: project.id,
           prefix: project.prefix,
-          leadThreadId: meta.leadThreadId,
+          leadThreadId: author,
           inReplyTo: to,
           audience: to ? null : audience,
           kind: input.options.kind ?? (to ? "result" : "update"),
-          author: meta.leadThreadId,
+          author,
           text,
           key,
         });
@@ -375,11 +381,14 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
         { name: "id", description: "Request id (req_...)", required: true },
       ],
-      options: { json },
+      options: {
+        resend: { type: "boolean", description: "Send it to the current lead even if an earlier copy may already be in a thread that can't be checked (a hidden one)" },
+        json,
+      },
       async run(input) {
         const project = await deps.resolveProject(input.positionals.project);
         const id = input.positionals.id.trim();
-        const result = await courier.retry(project.id, id);
+        const result = await courier.retry(project.id, id, Boolean(input.options.resend));
         if (result.outcome === "unknown") throw new PluginCliError(`No ${project.prefix} request ${id}.`);
         if (result.outcome === "not-retryable") throw new PluginCliError(`Request ${id} is ${result.request!.state}; only failed, held or pending requests can be retried.`);
         bb.rpc.experimental_invalidate([`inbox:${project.id}`]);

@@ -6,7 +6,7 @@ import { createMailbox, MIGRATIONS, type SqlDb } from "../src/mailbox";
 import { createCourier, type CourierDeps, type LeadState } from "../src/courier";
 import type { WakeBody } from "../src/transport";
 import { sight, type ProbeApi } from "../src/probe";
-import { capturedSearch, typedQueued, typedSearch } from "../src/probe.fixtures";
+import { capturedSearch, typedQueued, typedRelayEvent, typedSearch } from "../src/probe.fixtures";
 
 export type TestDb = SqlDb & { close(): void };
 
@@ -49,15 +49,15 @@ export function world(db: SqlDb, clock: Clock) {
   const threads = new Map<string, LeadState>([["thr_lead1", "ok"]]);
   const busy = new Set<string>();
   const queues = new Map<string, QueueRow[]>();
-  const timeline = new Map<string, string[]>();
+  const timeline = new Map<string, { text: string; sender: string | null }[]>();
   const sent: Sent[] = [];
   const wakes: WakeBody[] = [];
   const logs: string[] = [];
-  const faults = { send: 0, leadOf: 0, probe: 0, wake: 0, drop: 0, sendHangs: null as null | Promise<void>, shape: null as null | "search" | "queue", captured: false };
+  const faults = { send: 0, leadOf: 0, probe: 0, wake: 0, drop: 0, sendHangs: null as null | Promise<void>, shape: null as null | "search" | "queue", captured: false, dropDispatches: 0 };
   let transportOn = true;
   let queuedSeq = 0;
 
-  const landedIn = (threadId: string, text: string) => timeline.set(threadId, [...(timeline.get(threadId) ?? []), text]);
+  const landedIn = (threadId: string, text: string, sender: string | null = null) => timeline.set(threadId, [...(timeline.get(threadId) ?? []), { text, sender }]);
   const dispatch = (threadId: string) => {
     const rows = queues.get(threadId) ?? [];
     queues.set(threadId, rows.filter((row) => row.state === "failed_exhausted" || row.waitingOn?.kind === "superseded"));
@@ -76,11 +76,16 @@ export function world(db: SqlDb, clock: Clock) {
     search: async (query, limitPerGroup) => {
       if (limitPerGroup !== "50") throw new Error(`limitPerGroup must be at most 50, got ${limitPerGroup}`);
       if (faults.shape === "search") return { results: [] };
-      const hits = [...timeline.entries()].flatMap(([threadId, texts]) =>
-        texts.filter((text) => text.includes(query)).slice(0, 1).map((text) => ({ threadId, archived: threads.get(threadId) === "archived", text: text.slice(0, 160) })),
-      );
-      if (faults.captured && hits[0]) return capturedSearch(hits[0].threadId, hits[0].text);
+      const hits = [...timeline.entries()].flatMap(([threadId, items]) => {
+        const seq = items.findIndex((item) => item.text.includes(query));
+        return seq < 0 ? [] : [{ threadId, archived: threads.get(threadId) === "archived", text: items[seq]!.text.slice(0, 160), seq: seq + 1 }];
+      });
+      if (faults.captured && hits[0]) return capturedSearch(hits[0].threadId, hits[0].text, "user_message", hits[0].seq);
       return typedSearch(hits.filter((hit) => threads.get(hit.threadId) !== "hidden"));
+    },
+    event: async (threadId, seq) => {
+      const item = timeline.get(threadId)?.[seq - 1];
+      return item ? typedRelayEvent(threadId, seq, item.text, item.sender) : [];
     },
   };
 
@@ -112,6 +117,11 @@ export function world(db: SqlDb, clock: Clock) {
     },
     sight: (threadId, requestId) => sight(probeApi, threadId, requestId),
     dropQueued: async (threadId, queuedId) => {
+      if (faults.dropDispatches > 0) {
+        faults.dropDispatches--;
+        dispatch(threadId);
+        throw new Error("queued message not found");
+      }
       if (faults.drop > 0) {
         faults.drop--;
         throw new Error("queue delete failed");

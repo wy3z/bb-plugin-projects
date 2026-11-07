@@ -465,16 +465,16 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     );
   }
 
-  function retry(projectId: string, id: string): { outcome: "requeued" | "unknown" | "not-retryable"; request: Request | null } {
+  function retry(projectId: string, id: string, resend = false): { outcome: "requeued" | "unknown" | "not-retryable"; request: Request | null } {
     return db().transaction(() => {
       const row = getRequest(id);
       if (!row || row.projectId !== projectId) return { outcome: "unknown" as const, request: null };
       if (row.state !== "failed" && row.state !== "held" && row.state !== "pending") return { outcome: "not-retryable" as const, request: row };
       db()
         .prepare(
-          "UPDATE requests SET state = 'pending', failures = 0, check_misses = 0, failed_at = NULL, delivery = NULL, delivered_at = NULL, confirmed_at = NULL, checked_at = NULL, next_attempt_at = ?, generation = generation + 1, last_error = NULL WHERE id = ?",
+          "UPDATE requests SET state = 'pending', failures = 0, check_misses = 0, failed_at = NULL, delivery = NULL, delivered_at = NULL, confirmed_at = NULL, checked_at = NULL, next_attempt_at = ?, generation = generation + 1, last_error = NULL, target_thread_id = CASE WHEN ? THEN NULL ELSE target_thread_id END WHERE id = ?",
         )
-        .run(clock(), id);
+        .run(clock(), resend ? 1 : 0, id);
       return { outcome: "requeued" as const, request: getRequest(id) };
     })();
   }
@@ -549,11 +549,11 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
   }
 
   function addReply(input: ReplyInput): { reply: Reply; duplicate: boolean } {
-    const key = input.key ?? sha(input.leadThreadId, input.inReplyTo, input.kind, input.text);
     return db().transaction(() => {
+      const audience = input.audience ?? (input.inReplyTo ? (getRequest(input.inReplyTo)?.source ?? null) : null);
+      const key = input.key ?? sha(input.leadThreadId, input.inReplyTo, input.kind, input.text, audience);
       const existing = db().prepare("SELECT * FROM replies WHERE project_id = ? AND idem_key = ?").get(input.projectId, key) as Row | null | undefined;
       if (existing) return { reply: toReply(existing), duplicate: true };
-      const audience = input.audience ?? (input.inReplyTo ? (getRequest(input.inReplyTo)?.source ?? null) : null);
       const id = newId("rep");
       db()
         .prepare(

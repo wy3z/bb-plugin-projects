@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Clock, openDb, pixel, tempDbPath, world } from "../test/harness";
-import { backoffMs, CHECK_EVERY_MS, MAX_FAILURES, RETENTION_MS } from "./mailbox";
+import { backoffMs, CHECK_EVERY_MS, HOLD_RECHECK_MS, LEASE_MS, MAX_FAILURES, RETENTION_MS } from "./mailbox";
+import { requestPrompt } from "./courier";
 
 const ask = (text: string, key: string | null = null) => ({ ...pixel, source: "grok-bot", text, ref: null, key });
 
@@ -48,6 +49,100 @@ describe("queued deliveries are confirmed, not assumed", () => {
     expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead1", "thr_lead2"]);
     expect(w.sent[1]!.text).toContain("Redelivery");
     expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", delivery: "sent", targetThreadId: "thr_lead2" });
+  });
+
+  it("does not redeliver while the stale queued copy on an archived lead cannot be removed", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    w.busy.add("thr_lead1");
+    const { request } = w.mailbox.enqueue(ask("stuck behind archive"));
+    await w.courier.deliver(request.id);
+    w.threads.set("thr_lead1", "archived");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+    w.faults.drop = 1;
+    clock.advance(CHECK_EVERY_MS);
+    await w.courier.tick();
+    expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead1"]);
+    expect(w.queues.get("thr_lead1")).toHaveLength(1);
+    expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "pending", targetThreadId: "thr_lead1" });
+    expect(w.mailbox.getRequest(request.id)!.lastError).toContain("could not be removed");
+
+    clock.advance(backoffMs(MAX_FAILURES));
+    await w.courier.tick();
+    expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead1", "thr_lead2"]);
+    expect(w.queues.get("thr_lead1")).toEqual([]);
+    expect(w.timeline.get("thr_lead1") ?? []).toEqual([]);
+    expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", targetThreadId: "thr_lead2" });
+  });
+
+  it("when the stale copy dispatched just before it could be removed, it counts as delivered there and is not sent again", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    w.busy.add("thr_lead1");
+    const { request } = w.mailbox.enqueue(ask("racing the queue"));
+    await w.courier.deliver(request.id);
+    w.threads.set("thr_lead1", "archived");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+    w.faults.dropDispatches = 1;
+    clock.advance(CHECK_EVERY_MS);
+    await w.courier.tick();
+    expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead1"]);
+    expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", delivery: "recovered", targetThreadId: "thr_lead1" });
+  });
+
+  it("an interrupted delivery whose target was then hidden is held, not resent, until it can be checked or is resent on purpose", async () => {
+    const path = tempDbPath();
+    const clock = new Clock();
+    const w = world(openDb(path), clock);
+    const { request } = w.mailbox.enqueue(ask("landed then hidden"));
+    w.mailbox.claim(request.id);
+    w.mailbox.setTarget(request.id, "thr_lead1");
+    w.landedIn("thr_lead1", requestPrompt(request, false));
+    w.threads.set("thr_lead1", "hidden");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+
+    const restarted = world(openDb(path), clock);
+    restarted.timeline.set("thr_lead1", w.timeline.get("thr_lead1")!);
+    restarted.threads.set("thr_lead1", "hidden");
+    restarted.leads.set(pixel.projectId, "thr_lead2");
+    restarted.threads.set("thr_lead2", "ok");
+    clock.advance(LEASE_MS + 1);
+    await restarted.courier.tick();
+    expect(restarted.sent).toHaveLength(0);
+    expect(restarted.mailbox.getRequest(request.id)).toMatchObject({ state: "held", targetThreadId: "thr_lead1" });
+    const notice = restarted.mailbox.listReplies({ consumer: "grok-bot" }).find((reply) => reply.kind === "notice")!;
+    expect(notice.text).toContain(`bb projects retry PIXEL ${request.id} --resend`);
+    clock.advance(HOLD_RECHECK_MS);
+    await restarted.courier.tick();
+    expect(restarted.sent).toHaveLength(0);
+
+    restarted.threads.set("thr_lead1", "ok");
+    clock.advance(HOLD_RECHECK_MS);
+    await restarted.courier.tick();
+    expect(restarted.sent).toHaveLength(0);
+    expect(restarted.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", delivery: "recovered", targetThreadId: "thr_lead1" });
+  });
+
+  it("--resend sends a held, unverifiable request to the current lead on purpose", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    const { request } = w.mailbox.enqueue(ask("resend me"));
+    w.mailbox.claim(request.id);
+    w.mailbox.setTarget(request.id, "thr_lead1");
+    w.landedIn("thr_lead1", requestPrompt(request, false));
+    w.threads.set("thr_lead1", "hidden");
+    w.leads.set(pixel.projectId, "thr_lead2");
+    w.threads.set("thr_lead2", "ok");
+    clock.advance(LEASE_MS + 1);
+    await w.courier.tick();
+    expect(w.mailbox.getRequest(request.id)!.state).toBe("held");
+    expect((await w.courier.retry(pixel.projectId, request.id))!.request).toMatchObject({ state: "held" });
+    const resent = await w.courier.retry(pixel.projectId, request.id, true);
+    expect(resent.request).toMatchObject({ state: "delivered", targetThreadId: "thr_lead2" });
+    expect(w.sent.map((item) => item.threadId)).toEqual(["thr_lead2"]);
   });
 
   it("a queued copy BB gave up on is reported as failed, then an explicit retry replaces it once", async () => {
@@ -104,7 +199,7 @@ describe("queued deliveries are confirmed, not assumed", () => {
     crashedDb.close();
 
     const restarted = world(openDb(path), clock);
-    restarted.queues.set("thr_lead1", [{ id: "qm_9", text: `[Outer loop · grok-bot] PIXEL\nRequest ${request.id}.`, state: "queued" }]);
+    restarted.queues.set("thr_lead1", [{ id: "qm_9", text: `[Outer loop · grok-bot] PIXEL\nRequest ${request.id} from grok-bot.`, state: "queued" }]);
     clock.advance(5 * 60_000 + 1);
     await restarted.courier.tick();
     expect(restarted.sent).toHaveLength(0);
@@ -118,7 +213,7 @@ describe("queued deliveries are confirmed, not assumed", () => {
     const { request } = w.mailbox.enqueue(ask("captured shape"));
     w.mailbox.claim(request.id);
     w.mailbox.setTarget(request.id, "thr_lead1");
-    w.landedIn("thr_lead1", `[Outer loop · grok-bot] PIXEL\nRequest ${request.id}.`);
+    w.landedIn("thr_lead1", `[Outer loop · grok-bot] PIXEL\nRequest ${request.id} from grok-bot.`);
     clock.advance(5 * 60_000 + 1);
     await w.courier.tick();
     expect(w.mailbox.getRequest(request.id)).toMatchObject({ state: "delivered", delivery: "recovered" });

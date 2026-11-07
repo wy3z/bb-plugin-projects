@@ -109,6 +109,17 @@ anything else happens, so a restart or a failed call loses nothing.
   lead's thread and queue so a copy that did land is not sent twice.
 - If BB restarts in the middle of a delivery, the next attempt makes the same
   check. If the check cannot see it, the lead is told it may be a redelivery.
+  Only the relay message itself counts as arrived: the search hit's message
+  is read back and must be the plugin's `[Outer loop · …]` message for that
+  request id, not an agent or worker merely mentioning the id.
+- A stale queued copy is removed before a request goes to another lead; if
+  it cannot be removed, nothing is sent and the attempt is retried. If the
+  earlier target is now hidden, so the check cannot see into it, the request
+  is held with a notice instead of risking a duplicate;
+  `bb projects retry PIXEL <req> --resend` sends it to the current lead anyway.
+- The thread a request was delivered to can always answer that request with
+  `--to`, even after it stops being the lead; only the current lead can send
+  news without `--to`.
 - Replies are per agent. An agent follows a project's lead once it sends a
   request or reads `replies PIXEL --as <agent>`. A reply `--to` a request,
   and the `notice` and `failure` replies about it, go only to the agent that
