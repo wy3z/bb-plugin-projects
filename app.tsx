@@ -10,13 +10,13 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { ProjectView } from "./src/ProjectView";
 import { ManagerTabs } from "./src/ManagerTabs";
+import { LeadPanelDefault, PROJECT_TAB, useIsLeadThread } from "./src/LeadPanel";
 import { useProjects } from "./src/data";
 import type { Project } from "./src/contracts";
 import { projectsContract } from "./src/meta";
 import { ProjectGlyph } from "./src/glyphs";
 
 const PROJECT_ICON = "bb-projects:project";
-const PROJECT_TAB = { id: "manager-project", context: { kind: "thread" }, availability: "fixed" } as const;
 
 function useManagedProject(threadId: string): { project: Project | null; projects: Project[] } {
   const { projects } = useProjects();
@@ -106,6 +106,13 @@ export default definePluginApp((app) => {
     component: ProjectsPage,
   });
   app.slots.experimental_appOverlay({ id: "manager-tabs", component: ManagerTabs });
+  app.slots.experimental_threadContextSegment({
+    id: "lead-panel",
+    title: "Project board",
+    group: "zz-projects",
+    summary: LeadPanelDefault,
+    useVisible: useIsLeadThread,
+  });
   app.slots.experimental_tab({
     ...PROJECT_TAB,
     title: "Project",
