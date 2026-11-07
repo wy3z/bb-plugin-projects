@@ -392,7 +392,7 @@
   align-items: center;
   gap: var(--bbs-gap);
   min-height: 36px;
-  padding: 6px 8px 6px 12px;
+  padding: 6px 8px 6px calc(var(--bbp-row-inset) - 1px);
   border-color: transparent;
   border-radius: var(--bbs-radius-md);
   background: transparent;
@@ -410,8 +410,44 @@
   text-decoration: line-through;
   text-decoration-color: color-mix(in srgb, var(--foreground) 35%, transparent);
 }
-.bbp-card[data-layout="row"] .bbp-card__chips {
+.bbp-group {
+  --bbp-row-inset: 28px;
+  --bbp-pr-slot: 72px;
+  --bbp-agent-slot: 200px;
+}
+.bbp-row-slots {
+  display: flex;
   flex: 0 0 auto;
+  gap: var(--bbs-gap-xs);
+  margin-left: auto;
+}
+.bbp-row-pr,
+.bbp-row-agent {
+  display: flex;
+  min-width: 0;
+}
+.bbp-row-pr {
+  width: var(--bbp-pr-slot);
+}
+.bbp-row-agent {
+  width: var(--bbp-agent-slot);
+}
+.bbp-row-pr .bbp-chip,
+.bbp-row-agent .bbp-chip {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  justify-content: flex-start;
+}
+.bbp-agent-chip > .bbp-dot {
+  margin: 0 1px;
+}
+.bbp-row-pr__more {
+  margin-left: auto;
+  color: var(--bbp-muted);
+}
+.bbp-row-slots > .bbp-flash {
+  width: calc(var(--bbp-pr-slot) + var(--bbs-gap-xs) + var(--bbp-agent-slot));
 }
 .bbp-card[data-layout="row"] .bbp-chip {
   height: 22px;
@@ -419,7 +455,6 @@
   font-size: var(--bbs-text-body);
 }
 .bbp-agent-chip {
-  max-width: 220px;
   min-width: 0;
   gap: var(--bbs-gap-icon);
   padding: 0 8px;
@@ -427,13 +462,18 @@
   color: var(--bbs-text-secondary);
 }
 @container bbp-list (max-width: 560px) {
-  .bbp-agent-chip {
-    max-width: 112px;
+  .bbp-group {
+    --bbp-agent-slot: 120px;
   }
 }
 @container bbp-list (max-width: 360px) {
+  .bbp-group {
+    --bbp-pr-slot: 56px;
+    --bbp-agent-slot: 22px;
+  }
   .bbp-agent-chip__name,
-  .bbp-agent-chip__more {
+  .bbp-agent-chip__more,
+  .bbp-row-pr__more {
     display: none;
   }
   .bbp-agent-chip {
@@ -742,8 +782,9 @@
   gap: var(--bbs-gap-tight);
 }
 .bbp-group__head {
+  position: relative;
   width: 100%;
-  padding: 8px 12px 8px 6px;
+  padding: 8px 12px 8px var(--bbp-row-inset);
   border: 0;
   border-radius: var(--bbs-radius-md);
   background: color-mix(in srgb, var(--foreground) 4%, transparent);
@@ -769,8 +810,12 @@
 }
 .bbp-group__head > svg:first-child,
 .bbp-group__head > [data-icon-root]:first-child {
+  position: absolute;
+  top: 50%;
+  left: calc((var(--bbp-row-inset) - var(--bbs-icon)) / 2);
   width: var(--bbs-icon);
   height: var(--bbs-icon);
+  margin-top: calc(var(--bbs-icon) / -2);
   color: var(--bbp-muted);
   transition: transform 160ms ease;
 }

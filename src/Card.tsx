@@ -274,31 +274,50 @@ export function TaskCard({
     </a>
   ));
 
+  const rowPr = openPr ?? pullRequests[0] ?? null;
+
   if (layout === "row") {
     return (
       <article {...shell}>
         <StatusGlyph status={task.status} />
         <span className="bbp-card__key">{task.key}</span>
         <span className="bbp-card__title">{renderTitle(task.title)}</span>
-        <span className="bbp-card__chips">
+        <span className="bbp-row-slots">
           {flashChip ?? (
             <>
-              {prChips}
-              {primary && agentName ? (
-                <button
-                  type="button"
-                  className="bbp-chip bbp-agent-chip"
-                  data-tone={agentTone}
-                  title={`${agentName}, ${agentState}${worker.count > 1 ? `, ${worker.count} agents` : ""}. Ctrl-click opens a split.`}
-                  onClick={(event) => openThread(event.ctrlKey || event.metaKey)}
-                >
-                  <Dot tone={agentTone} />
-                  <span className="bbp-agent-chip__name" data-shimmer={agentTone === "working" || undefined}>
-                    {agentName}
-                  </span>
-                  {worker.count > 1 ? <span className="bbp-agent-chip__more">+{worker.count - 1}</span> : null}
-                </button>
-              ) : null}
+              <span className="bbp-row-pr">
+                {rowPr ? (
+                  <a
+                    className="bbp-chip"
+                    data-pr={rowPr.state}
+                    href={rowPr.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={pullRequests.map((pr) => `#${pr.number} ${pr.title} (${pr.state})`).join("\n")}
+                  >
+                    <Icon name={PR_ICON[rowPr.state]} />
+                    <span>#{rowPr.number}</span>
+                    {pullRequests.length > 1 ? <span className="bbp-row-pr__more">+{pullRequests.length - 1}</span> : null}
+                  </a>
+                ) : null}
+              </span>
+              <span className="bbp-row-agent">
+                {primary && agentName ? (
+                  <button
+                    type="button"
+                    className="bbp-chip bbp-agent-chip"
+                    data-tone={agentTone}
+                    title={`${agentName}, ${agentState}${worker.count > 1 ? `, ${worker.count} agents` : ""}. Ctrl-click opens a split.`}
+                    onClick={(event) => openThread(event.ctrlKey || event.metaKey)}
+                  >
+                    <Dot tone={agentTone} />
+                    <span className="bbp-agent-chip__name" data-shimmer={agentTone === "working" || undefined}>
+                      {agentName}
+                    </span>
+                    {worker.count > 1 ? <span className="bbp-agent-chip__more">+{worker.count - 1}</span> : null}
+                  </button>
+                ) : null}
+              </span>
             </>
           )}
         </span>
