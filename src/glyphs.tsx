@@ -68,11 +68,8 @@ export function formatElapsed(fromIso: string | number, now: number): string {
 
 export function ProjectGlyph({ className }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
-      <path d="M8.5 7.5v8" />
-      <path d="M12 7.5v4" />
-      <path d="M15.5 7.5v6" />
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d="M13 .875c1.174 0 2.125.951 2.125 2.125v10c0 1.174-.951 2.125-2.125 2.125H3C1.826 15.125.875 14.174.875 13V3C.875 1.826 1.826.875 3 .875zM3 2.125c-.483 0-.875.392-.875.875v10c0 .483.392.875.875.875h10c.483 0 .875-.392.875-.875V3c0-.483-.392-.875-.875-.875zm2 1.75c.345 0 .625.28.625.625v7c0 .345-.28.625-.625.625s-.625-.28-.625-.625v-7c0-.345.28-.625.625-.625m6 0c.345 0 .625.28.625.625v5c0 .345-.28.625-.625.625s-.625-.28-.625-.625v-5c0-.345.28-.625.625-.625m-3 0c.345 0 .625.28.625.625V7c0 .345-.28.625-.625.625s-.625-.28-.625-.625V4.5c0-.345.28-.625.625-.625" fill="currentColor" />
     </svg>
   );
 }

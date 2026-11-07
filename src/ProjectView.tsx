@@ -5,7 +5,7 @@ import { TaskCard, type CardContext } from "./Card";
 import { byStatus, useBoardMoves, useNow, usePresets, useProjectData, useThreadIndex, type MoveTask } from "./data";
 import { FilterIcon, STATUS_LABEL, StatusGlyph } from "./glyphs";
 import { ProjectIconMark, useProjectIcon } from "./ProjectIcon";
-import { FocusCard, LeadLink, useProjectMeta } from "./Focus";
+import { useProjectMeta } from "./Focus";
 import { LoopCard } from "./Loop";
 import { TaskDetail } from "./TaskDetail";
 import { usePopover } from "./usePopover";
@@ -106,7 +106,7 @@ export function ProjectView({
   const presets = usePresets();
   const now = useNow();
   const targetEnvironmentId = useCheckoutEnvironment(project, threads);
-  const { meta, setFocus, setLoop } = useProjectMeta(projectId);
+  const { meta, setLoop } = useProjectMeta(projectId);
   const [view, setView] = useState<View>(() => (compact ? "list" : readView("board")));
   const [query, setQuery] = useState("");
   const statusFilter = useStatusFilter(projectId);
@@ -158,13 +158,13 @@ export function ProjectView({
           )}
         </div>
         <div className="bbp-toolbar__actions">
-          <LeadLink threadId={meta?.leadThreadId ?? null} threads={threads} />
           <SearchControl query={query} onChange={setQuery} />
           <FilterMenu query={query} onQuery={setQuery} shown={statusFilter.shown} onToggle={statusFilter.toggle} active={!statusFilter.isDefault || query.trim() !== ""} />
-          <ProjectMenu focus={meta?.focus ?? null}>
-            <FocusCard meta={meta} onSave={setFocus} />
-            <LoopCard projectId={projectId} meta={meta} onChange={setLoop} defaultOpen />
-          </ProjectMenu>
+          {meta?.leadThreadId ? (
+            <LoopMenu>
+              <LoopCard projectId={projectId} meta={meta} onChange={setLoop} defaultOpen />
+            </LoopMenu>
+          ) : null}
           <div className="bbp-segmented" role="radiogroup" aria-label="View">
             <button type="button" role="radio" aria-checked={view === "list"} onClick={() => changeView("list")}>
               List
@@ -299,20 +299,20 @@ function FilterMenu({
   );
 }
 
-function ProjectMenu({ focus, children }: { focus: string | null; children: ReactNode }) {
+function LoopMenu({ children }: { children: ReactNode }) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="bbp-anchor" ref={ref}>
       <button
         type="button"
         className="bbp-toggle"
-        title={focus ? `Focus: ${focus}` : "Focus, loop and memory"}
-        aria-label="Focus, loop and memory"
+        title="Loop: sweep, PR following, memory and outside requests"
+        aria-label="Loop settings"
         aria-expanded={open}
         aria-pressed={open}
         onClick={() => setOpen(!open)}
       >
-        <Icon name="Target" />
+        <Icon name="RotateCcw" />
       </button>
       {open ? <div className="bbp-popover">{children}</div> : null}
     </div>
