@@ -2,10 +2,9 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { createPortal } from "react-dom";
 import {
   experimental_Icon as Icon,
-  experimental_useAppPanel,
-  experimental_usePanelTabs,
   experimental_useRpcQuery,
   experimental_useSidebarThreads,
+  ThreadChat,
   useBbContext,
   useBbNavigate,
   type PluginSidebarThread,
@@ -14,76 +13,8 @@ import { projectsContract } from "./meta";
 
 const STORE_KEY = "bb-projects:tabs";
 const HOST_ATTR = "data-bb-projects-tabs";
+const CHAT_ATTR = "data-bb-projects-chat";
 const HEADER_SELECTOR = "header:has([data-thread-header-workflow-actions])";
-const PROJECT_TAB = { id: "manager-project", context: { kind: "thread" }, availability: "fixed" } as const;
-
-type PanelCarry = { to: string; mode: "project" | "closed" };
-
-let pendingCarry: PanelCarry | null = null;
-let livePanel: { threadId: string; mode: PanelCarry["mode"] | null } | null = null;
-let carrySeq = 0;
-const carryListeners = new Set<() => void>();
-
-function setCarry(next: PanelCarry | null) {
-  pendingCarry = next;
-  carrySeq++;
-  for (const listener of carryListeners) listener();
-}
-
-function useCarrySeq(): number {
-  return useSyncExternalStore(
-    (listener) => {
-      carryListeners.add(listener);
-      return () => carryListeners.delete(listener);
-    },
-    () => carrySeq,
-  );
-}
-
-function isProjectTab(state: ReturnType<ReturnType<typeof experimental_useAppPanel>["getTabs"]>): boolean {
-  const selected = state.tabs.find((tab) => tab.key === state.selectedKey);
-  return state.open && selected?.detail.kind === "plugin" && selected.detail.pluginId === "projects" && selected.detail.tab.id === PROJECT_TAB.id;
-}
-
-export function useCarryPanel({ threadId }: { threadId: string }): boolean {
-  const panel = experimental_useAppPanel();
-  const panelTabs = experimental_usePanelTabs();
-  const seq = useCarrySeq();
-  useEffect(() => {
-    if (pendingCarry?.to === threadId) return;
-    livePanel = { threadId, mode: rememberPanel(panelTabs) };
-  }, [panelTabs, threadId]);
-  useEffect(() => {
-    const pending = pendingCarry;
-    if (!pending || pending.to !== threadId) return;
-    let frames = 0;
-    let stable = 0;
-    let handle = 0;
-    const apply = () => {
-      const state = panel.getTabs();
-      const settled = pending.mode === "closed" ? !state.open : isProjectTab(state);
-      if (settled) stable++;
-      else {
-        stable = 0;
-        if (pending.mode === "project") panel.openTab({ tab: PROJECT_TAB });
-        else panel.close();
-      }
-      if (stable >= 20 || ++frames > 120) {
-        if (pendingCarry === pending) pendingCarry = null;
-        return;
-      }
-      handle = requestAnimationFrame(apply);
-    };
-    handle = requestAnimationFrame(apply);
-    return () => cancelAnimationFrame(handle);
-  }, [panel, seq, threadId]);
-  return false;
-}
-
-export function rememberPanel(panelTabs: ReturnType<ReturnType<typeof experimental_useAppPanel>["getTabs"]>): PanelCarry["mode"] | null {
-  if (isProjectTab(panelTabs)) return "project";
-  return panelTabs.open ? null : "closed";
-}
 
 type TabStore = Record<string, string[]>;
 
@@ -95,41 +26,52 @@ function readStore(): TabStore {
   }
 }
 
-const listeners = new Set<() => void>();
-let snapshot = readStore();
+function createStore<T>(initial: T, persist?: (value: T) => void) {
+  const listeners = new Set<() => void>();
+  let value = initial;
+  return {
+    get: () => value,
+    set(next: T) {
+      value = next;
+      persist?.(next);
+      for (const listener of listeners) listener();
+    },
+    use(): T {
+      return useSyncExternalStore(
+        (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        () => value,
+      );
+    },
+  };
+}
 
-function writeStore(next: TabStore) {
-  snapshot = next;
+const tabStore = createStore<TabStore>(readStore(), (next) => {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(next));
   } catch {
     void 0;
   }
-  for (const listener of listeners) listener();
+});
+
+const viewStore = createStore<Record<string, string>>({});
+
+function setView(leadId: string, id: string | null) {
+  const next = { ...viewStore.get() };
+  if (id) next[leadId] = id;
+  else delete next[leadId];
+  viewStore.set(next);
 }
 
-function useTabStore(): TabStore {
-  return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => snapshot,
-  );
-}
-
-function findHeaderSlot(): HTMLElement | null {
+function findHeader(): HTMLElement | null {
   const headers = [...document.querySelectorAll<HTMLElement>(HEADER_SELECTOR)];
-  const single = headers.length === 1;
-  for (const header of headers) {
-    if (!single && !header.querySelector("[data-pane-header-focus-tab]") && !header.querySelector(".bbp-tabs-host")) continue;
-    const slot = header.querySelector<HTMLElement>('[data-testid="app-page-header-content-row"] > div > div');
-    if (slot) return slot;
-  }
-  return null;
+  if (headers.length === 1) return headers[0]!;
+  return headers.find((header) => header.querySelector("[data-pane-header-focus-tab]") || header.querySelector(".bbp-tabs-host")) ?? null;
 }
 
-function useHeaderHost(active: boolean, threadId: string | null): HTMLElement | null {
+function useMountedHost(active: boolean, key: string, locate: () => HTMLElement | null, mount: (slot: HTMLElement, node: HTMLElement) => void, className: string, attr: string) {
   const [host, setHost] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -138,19 +80,23 @@ function useHeaderHost(active: boolean, threadId: string | null): HTMLElement | 
       return;
     }
     let current: HTMLElement | null = null;
+    let marked: HTMLElement | null = null;
     const attach = () => {
-      const slot = findHeaderSlot();
-      if (current && slot && current.parentElement === slot && slot.firstElementChild === current) return;
+      const slot = locate();
+      if (current && slot && current.parentElement === slot) return;
       current?.remove();
+      marked?.removeAttribute(attr);
       current = null;
+      marked = null;
       if (!slot) {
         setHost(null);
         return;
       }
       const node = document.createElement("div");
-      node.className = "bbp-tabs-host";
-      slot.prepend(node);
-      slot.closest("header")?.setAttribute(HOST_ATTR, "");
+      node.className = className;
+      mount(slot, node);
+      marked = slot.closest<HTMLElement>("header") ?? slot;
+      marked.setAttribute(attr, "");
       current = node;
       setHost(node);
     };
@@ -159,13 +105,23 @@ function useHeaderHost(active: boolean, threadId: string | null): HTMLElement | 
     observer.observe(document.body, { childList: true, subtree: true });
     return () => {
       observer.disconnect();
-      current?.closest("header")?.removeAttribute(HOST_ATTR);
+      marked?.removeAttribute(attr);
       current?.remove();
       setHost(null);
     };
-  }, [active, threadId]);
+  }, [active, key]);
 
   return host;
+}
+
+function locateTabSlot(): HTMLElement | null {
+  return findHeader()?.querySelector<HTMLElement>('[data-testid="app-page-header-content-row"] > div > div') ?? null;
+}
+
+function locateThreadWindow(): HTMLElement | null {
+  const header = findHeader();
+  const pane = header?.closest<HTMLElement>("[data-split-pane-id]") ?? document;
+  return pane.querySelector<HTMLElement>("[data-thread-window]");
 }
 
 const WORKING = new Set(["runtime", "workflow", "background-agent", "background-command", "goal", "plan-mode", "working-draft"]);
@@ -185,7 +141,8 @@ export function ManagerTabs() {
   const navigate = useBbNavigate();
   const { threads } = experimental_useSidebarThreads();
   const leads = experimental_useRpcQuery({ contract: projectsContract, method: "listLeads", input: {} });
-  const store = useTabStore();
+  const store = tabStore.use();
+  const views = viewStore.use();
 
   const byId = useMemo(() => new Map(threads.map((thread) => [thread.id, thread])), [threads]);
   const leadIds = useMemo(() => new Set((leads.data?.leads ?? []).map((lead) => lead.threadId)), [leads.data]);
@@ -207,72 +164,82 @@ export function ManagerTabs() {
     return [leadId, ...open];
   }, [byId, leadId, store]);
 
+  const onLead = leadId !== null && threadId === leadId;
+  const overlayId = onLead && views[leadId] && tabs.includes(views[leadId]!) ? views[leadId]! : null;
+  const selectedId = overlayId ?? threadId;
+
   useEffect(() => {
     if (!leadId || !threadId || threadId === leadId) return;
-    const open = snapshot[leadId] ?? [];
-    if (open.includes(threadId)) return;
-    writeStore({ ...snapshot, [leadId]: [...open, threadId] });
+    const open = tabStore.get()[leadId] ?? [];
+    if (!open.includes(threadId)) tabStore.set({ ...tabStore.get(), [leadId]: [...open, threadId] });
   }, [leadId, threadId]);
 
-  const go = useCallback(
+  const select = useCallback(
     (id: string) => {
-      const mode = livePanel?.threadId === threadId ? livePanel.mode : null;
-      setCarry(mode ? { to: id, mode } : null);
-      navigate.toThread(id);
+      if (!leadId) return;
+      setView(leadId, id === leadId ? null : id);
+      if (!onLead) navigate.toThread(leadId);
     },
-    [navigate, threadId],
+    [leadId, navigate, onLead],
   );
 
   const close = useCallback(
     (id: string) => {
       if (!leadId) return;
       const index = tabs.indexOf(id);
-      writeStore({ ...snapshot, [leadId]: (snapshot[leadId] ?? []).filter((item) => item !== id) });
-      if (id === threadId) go(tabs[index - 1] ?? leadId);
+      tabStore.set({ ...tabStore.get(), [leadId]: (tabStore.get()[leadId] ?? []).filter((item) => item !== id) });
+      if (id === selectedId) select(tabs[index - 1] ?? leadId);
     },
-    [go, leadId, tabs, threadId],
+    [leadId, select, selectedId, tabs],
   );
 
-  const host = useHeaderHost(leadId !== null, threadId);
-  if (!host || !leadId) return null;
+  const tabHost = useMountedHost(leadId !== null, `${leadId}:${threadId}`, locateTabSlot, (slot, node) => slot.prepend(node), "bbp-tabs-host", HOST_ATTR);
+  const chatHost = useMountedHost(overlayId !== null, `${leadId}:${threadId}`, locateThreadWindow, (slot, node) => slot.append(node), "bbp-chat-host", CHAT_ATTR);
 
-  return createPortal(
-    <div className="bbp-tabs" role="tablist" aria-label="Project threads">
-      {tabs.map((id) => {
-        const thread = byId.get(id);
-        const selected = id === threadId;
-        const isLead = id === leadId;
-        return (
-          <div key={id} className="bbp-tabs__tab" data-selected={selected || undefined} data-lead={isLead || undefined}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              className="bbp-tabs__label"
-              title={thread?.displayTitle}
-              onClick={() => {
-                if (!selected) go(id);
-              }}
-              onAuxClick={(event) => {
-                if (event.button === 1 && !isLead) {
-                  event.preventDefault();
-                  close(id);
-                }
-              }}
-            >
-              {isLead ? <Icon name={"bb-projects:project" as "Layers"} className="bbp-tabs__icon size-3.5" /> : null}
-              <span className="bbp-tabs__text">{thread?.displayTitle ?? "Thread"}</span>
-              <TabStatus thread={thread} />
-            </button>
-            {isLead ? null : (
-              <button type="button" className="bbp-tabs__close" aria-label={`Close ${thread?.displayTitle ?? "tab"}`} onClick={() => close(id)}>
-                <Icon name="X" className="size-3" />
-              </button>
-            )}
-          </div>
-        );
-      })}
-    </div>,
-    host,
+  if (!tabHost || !leadId) return null;
+
+  return (
+    <>
+      {createPortal(
+        <div className="bbp-tabs" role="tablist" aria-label="Project threads">
+          {tabs.map((id) => {
+            const thread = byId.get(id);
+            const selected = id === selectedId;
+            const isLead = id === leadId;
+            return (
+              <div key={id} className="bbp-tabs__tab" data-selected={selected || undefined} data-lead={isLead || undefined}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  className="bbp-tabs__label"
+                  title={thread?.displayTitle}
+                  onClick={() => {
+                    if (!selected) select(id);
+                  }}
+                  onAuxClick={(event) => {
+                    if (event.button === 1 && !isLead) {
+                      event.preventDefault();
+                      close(id);
+                    }
+                  }}
+                >
+                  {isLead ? <Icon name={"bb-projects:project" as "Layers"} className="bbp-tabs__icon size-3.5" /> : null}
+                  <span className="bbp-tabs__text">{thread?.displayTitle ?? "Thread"}</span>
+                  <TabStatus thread={thread} />
+                </button>
+                {isLead ? null : (
+                  <button type="button" className="bbp-tabs__close" aria-label={`Close ${thread?.displayTitle ?? "tab"}`} onClick={() => close(id)}>
+                    <Icon name="X" className="size-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>,
+        tabHost,
+      )}
+      {chatHost && overlayId ? createPortal(<ThreadChat key={overlayId} threadId={overlayId} variant="full" />, chatHost) : null}
+    </>
   );
 }
