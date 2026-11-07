@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { cliCommand, defineCli, PluginCliError, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { META_CHANGED, projectsContract, type ProjectMeta } from "./src/meta";
 import { STATUSES, TASKS_PLUGIN, tasksContract, type Project, type Status, type Task } from "./src/contracts";
@@ -19,9 +20,31 @@ export default function plugin(bb: BbPluginApi) {
     return { focus: stored?.focus ?? null, focusUpdatedAt: stored?.focusUpdatedAt ?? null, leadThreadId: stored?.leadThreadId ?? null };
   }
 
+  async function quietLead(threadId: string): Promise<void> {
+    try {
+      const listed = await bb.sdk.plugins.callRpc({
+        pluginId: "push-notifications",
+        method: "threadNotifications.list",
+        input: { threadIds: [threadId] },
+        outputSchema: z.object({ threads: z.record(z.string(), z.object({ own: z.string() }).passthrough()) }),
+      });
+      const own = listed.threads[threadId]?.own;
+      if (own && own !== "inherit") return;
+      await bb.sdk.plugins.callRpc({
+        pluginId: "push-notifications",
+        method: "threadNotifications.set",
+        input: { threadId, level: "input-only" },
+        outputSchema: z.unknown(),
+      });
+    } catch (cause) {
+      bb.log.warn(`Could not set the lead's notification level: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
   async function writeMeta(projectId: string, change: Partial<ProjectMeta>): Promise<ProjectMeta> {
     const next = { ...(await readMeta(projectId)), ...change };
     await bb.storage.kv.set(key(projectId), next);
+    if (change.leadThreadId) void quietLead(change.leadThreadId);
     bb.realtime.publish(META_CHANGED, { projectId });
     bb.rpc.experimental_invalidate(["leads", `meta:${projectId}`]);
     return next;
@@ -64,6 +87,13 @@ export default function plugin(bb: BbPluginApi) {
     });
     return new Map(result.cards.map((card) => [card.taskId, card.activeThreads]));
   }
+
+  void (async () => {
+    for (const storageKey of await bb.storage.kv.list("meta:")) {
+      const stored = await bb.storage.kv.get<ProjectMeta>(storageKey);
+      if (stored?.leadThreadId) await quietLead(stored.leadThreadId);
+    }
+  })().catch(() => undefined);
 
   bb.rpc.register(projectsContract, {
     getMeta: ({ projectId }) => readMeta(projectId),

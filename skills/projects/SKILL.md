@@ -54,6 +54,26 @@ can match the PR to the worker. Link the PR to the worker's thread with
   link, test results, what was verified and what was not.
 - Never mark something done because a worker said so. Check its evidence.
 
+## Notifications
+
+Your thread is set to notify only for questions, approvals and errors, so
+finishing a turn is silent. Most of your turns are routine (a worker reported,
+you moved a card) and should stay that way. Send a notification yourself only
+when the user has something to do or to see:
+
+```sh
+bb push-notifications send --thread <your thread id> --title "<PREFIX>: <what happened>" --body "<one line: what you need or what is ready>"
+```
+
+- Ready for the user: a task moved to `in_review`, or a PR is ready to merge.
+- Needs the user: a decision, credentials, access, or a worker blocked on them.
+  A question typed at the end of a turn does not notify; send one.
+- Complete: everything in the current focus or plan is done.
+
+One notification per event, never for progress, a worker starting, a card
+moving between in-flight columns, or a status update the user asked for in
+chat. Batch events that land in the same turn into one notification.
+
 ## Status updates
 
 When asked for a status update (or prompted by the weekly automation):
