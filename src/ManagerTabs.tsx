@@ -127,13 +127,13 @@ function locateThreadWindow(): HTMLElement | null {
 const WORKING = new Set(["runtime", "workflow", "background-agent", "background-command", "goal", "plan-mode", "working-draft"]);
 
 function TabStatus({ thread }: { thread: PluginSidebarThread | undefined }) {
-  if (!thread) return null;
+  if (!thread) return <span className="bbp-tabs__dot" data-tone="idle" aria-label="Idle" />;
   const { indicator } = thread;
   if (WORKING.has(indicator)) return <span className="bbs-live-orb" role="img" aria-label="Working" />;
   if (indicator === "waiting-for-input") return <span className="bbp-tabs__dot" data-tone="input" aria-label="Needs your input" />;
   if (indicator === "unread-error" || indicator === "queued-failed") return <span className="bbp-tabs__dot" data-tone="failed" aria-label="Failed" />;
   if (thread.isUnread) return <span className="bbp-tabs__dot" data-tone="unread" aria-label="Unread" />;
-  return null;
+  return <span className="bbp-tabs__dot" data-tone="idle" aria-label="Idle" />;
 }
 
 export function ManagerTabs() {
@@ -224,9 +224,9 @@ export function ManagerTabs() {
                     }
                   }}
                 >
+                  <TabStatus thread={thread} />
                   {isLead ? <Icon name={"bb-projects:project" as "Layers"} className="bbp-tabs__icon size-3.5" /> : null}
                   <span className="bbp-tabs__text">{thread?.displayTitle ?? "Thread"}</span>
-                  <TabStatus thread={thread} />
                 </button>
                 {isLead ? null : (
                   <button type="button" className="bbp-tabs__close" aria-label={`Close ${thread?.displayTitle ?? "tab"}`} onClick={() => close(id)}>

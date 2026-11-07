@@ -1420,7 +1420,10 @@ header[data-bb-projects-tabs] [data-testid="app-page-header-content-row"] > div 
   height: 6px;
   flex-shrink: 0;
   border-radius: var(--bbs-pill-radius);
-  background: var(--timeline-accent);
+  background: color-mix(in srgb, var(--foreground) 30%, transparent);
+}
+.bbp-tabs__dot[data-tone="unread"] {
+  background: var(--bbs-done-color);
 }
 .bbp-tabs__dot[data-tone="input"] {
   background: var(--warning, var(--attention));
