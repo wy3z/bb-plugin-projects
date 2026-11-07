@@ -206,7 +206,13 @@ export default function plugin(bb: BbPluginApi) {
                     inFlight,
                     needsYou,
                     loop: { sweepMinutes: meta.sweepMinutes, sweepWorkingHours: meta.sweepWorkingHours, sweepLastAt: meta.sweepLastAt, followPrs: meta.followPrs },
-                    messages: { requestsWaiting: requests.pending + requests.delivering + requests.held, requestsHeld: requests.held, repliesPending },
+                    messages: {
+                      requestsWaiting: requests.pending + requests.delivering + requests.held,
+                      requestsHeld: requests.held,
+                      requestsFailed: requests.failed,
+                      requestsAwaitingDispatch: messaging.mailbox.unconfirmedCount(project.id),
+                      repliesPending,
+                    },
                   }) + "\n",
               };
             }
@@ -215,6 +221,7 @@ export default function plugin(bb: BbPluginApi) {
               meta.focus ? `Focus: ${meta.focus}` : "Focus: none set",
               ...(leadStatus === "missing" || leadStatus === "archived" ? [`Lead: ${meta.leadThreadId} is ${leadStatus}`] : []),
               ...(requests.held ? [`${requests.held} outer-loop request${requests.held === 1 ? "" : "s"} waiting for a lead`] : []),
+              ...(requests.failed ? [`${requests.failed} outer-loop request${requests.failed === 1 ? "" : "s"} failed; see bb projects requests ${project.prefix}`] : []),
               STATUSES.filter((status) => counts[status]! > 0).map((status) => `${STATUS_WORD[status]} ${counts[status]}`).join(" · "),
               "",
               inFlight.length === 0 ? "Nothing in progress or for review." : "In flight:",

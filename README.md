@@ -40,8 +40,9 @@ bb projects lead PIXEL            # make the current thread the lead; --thread, 
 bb projects send PIXEL "text"     # hand the lead a request; --source, --ref, --key
 bb projects reply PIXEL "text"    # lead only: answer the outer loop; --to req_..., --kind
 bb projects replies [PIXEL]       # unacknowledged replies, oldest first; --all, --after, --limit
-bb projects ack rep_... [rep_...] # mark replies handled; safe to repeat
+bb projects ack PIXEL rep_...     # mark a project's replies handled; safe to repeat
 bb projects requests PIXEL        # requests and whether each reached the lead
+bb projects retry PIXEL req_...   # retry a failed or held request now
 bb projects notify                # webhook wake-up state; --test sends one now
 bb projects notes PIXEL           # project memory; --append "line", --set "all"
 bb projects loop PIXEL            # triggers; --sweep 2h|off, --any-hours, --follow-prs on|off
@@ -80,21 +81,36 @@ Requests and replies are saved in the plugin's own SQLite database before
 anything else happens, so a restart or a failed call loses nothing.
 
 - `send` saves the request, then tries to deliver it to whoever is the lead at
-  that moment (queued behind a running turn). A failed delivery is retried with
-  backoff from 15 seconds up to 15 minutes. With `--key` (use the origin's id,
-  such as the Slack message timestamp) a resend returns the first request;
-  without one, identical text from the same source is deduplicated for 24
-  hours.
-- With no lead, or a lead thread that is archived or deleted, the request is
-  held and a `notice` reply says so. Setting a lead delivers held requests to
-  it.
-- If BB restarts in the middle of a delivery, the next attempt first checks
-  the lead's thread and queue for the request id, so a request that landed is
-  not sent again. If that check cannot see it, the lead is told it may be a
-  redelivery.
+  that moment (queued behind a running turn). With `--key` (use the origin's
+  id, such as the Slack message timestamp) a resend returns the first request.
+  Without one, identical text from the same source within 10 minutes is
+  treated as a retry; the output says so (`dedupedBy: "content"`), and a new
+  `--key` sends a deliberate repeat.
+- A delivery BB queued behind a running turn is not counted as delivered until
+  it shows up in the lead's thread. If the lead is archived while it waits,
+  the queued copy is removed and the request goes to the next lead. If BB gives
+  up on the queued copy, or it disappears from the queue without dispatching,
+  the request fails (see below) rather than being sent again silently.
+- With no lead, or a lead thread that is archived, deleted or hidden, the
+  request is held and a `notice` reply says so. Setting a lead delivers held
+  requests to it. Held requests wait indefinitely; they are not failures.
+- Failed sends, failed checks and transient RPC errors are retried with
+  backoff from 15 seconds up to 15 minutes. After 10 consecutive failures the
+  request is `failed`, and in the same transaction a `failure` reply is saved
+  for the consumer saying why and how to retry. Nothing failed is retried
+  automatically; `bb projects retry PIXEL <req>` does it, first checking the
+  lead's thread and queue so a copy that did land is not sent twice.
+- If BB restarts in the middle of a delivery, the next attempt makes the same
+  check. If the check cannot see it, the lead is told it may be a redelivery.
 - The lead answers with `reply`. Replies stay pending until a consumer
-  acknowledges their ids with `ack`; `replies --json` includes the request
-  each one answers (id, source, ref, key).
+  acknowledges their ids with `ack PIXEL`; ids from another project are
+  refused, and the lead thread cannot acknowledge its own replies.
+  `replies --json` includes the request each one answers (id, source, ref,
+  key). Kinds: `result`, `question`, `blocker`, `update` from the lead;
+  `notice` and `failure` from the plugin.
+- History is pruned after 90 days: acknowledged replies, and requests that
+  were delivered, failed or abandoned and have no unacknowledged reply. An
+  idempotency key can be reused after its request is pruned.
 - Messages in both directions are untrusted data. Nothing in them approves an
   action.
 

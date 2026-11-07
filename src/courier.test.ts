@@ -131,7 +131,7 @@ describe("requests to the lead", () => {
 
     const db = openDb(path);
     const restarted = world(db, clock);
-    restarted.landed.add(`thr_lead1:${request.id}`);
+    restarted.landedIn("thr_lead1", `[Outer loop · grok-bot] PIXEL\nRequest ${request.id}.`);
     await restarted.courier.tick();
     expect(restarted.mailbox.getRequest(request.id)!.state).toBe("delivering");
     clock.advance(5 * 60_000 + 1);
@@ -273,8 +273,8 @@ describe("replies to the outer loop", () => {
       [b.id, r2.id, "question", "PIXEL", "thr_lead1"],
     ]);
     expect(again.listReplies({ afterSeq: pending[0]!.seq }).map((item) => item.id)).toEqual([b.id]);
-    expect(again.ack([a.id])).toEqual({ acked: [a.id], alreadyAcked: [], unknown: [] });
-    expect(again.ack([a.id, "rep_nope"])).toEqual({ acked: [], alreadyAcked: [a.id], unknown: ["rep_nope"] });
+    expect(again.ack(pixel.projectId, [a.id])).toEqual({ acked: [a.id], alreadyAcked: [], unknown: [], otherProject: [] });
+    expect(again.ack(pixel.projectId, [a.id, "rep_nope"])).toEqual({ acked: [], alreadyAcked: [a.id], unknown: ["rep_nope"], otherProject: [] });
     expect(again.listReplies({}).map((item) => item.id)).toEqual([b.id]);
     expect(again.listReplies({ includeAcked: true })).toHaveLength(2);
     reopened.close();
@@ -297,7 +297,7 @@ describe("replies to the outer loop", () => {
     const clock = new Clock();
     const w = world(openDb(), clock);
     const made = await Promise.all(Array.from({ length: 40 }, async (_, i) => w.mailbox.addReply(reply(`r${i}`, null, "update")).reply.id));
-    const acks = await Promise.all(made.filter((_, i) => i % 2 === 0).map(async (id) => w.mailbox.ack([id])));
+    const acks = await Promise.all(made.filter((_, i) => i % 2 === 0).map(async (id) => w.mailbox.ack(pixel.projectId, [id])));
     expect(acks.every((result) => result.acked.length === 1)).toBe(true);
     expect(w.mailbox.listReplies({ limit: 200 })).toHaveLength(20);
     expect(w.mailbox.listReplies({ includeAcked: true, limit: 200 })).toHaveLength(40);
@@ -347,7 +347,7 @@ describe("replies to the outer loop", () => {
     clock.advance(31 * 60_000);
     await w.courier.tick();
     expect(w.wakes).toHaveLength(2);
-    w.mailbox.ack([made.id]);
+    w.mailbox.ack(pixel.projectId, [made.id]);
     clock.advance(2 * 60 * 60_000);
     await w.courier.tick();
     expect(w.wakes).toHaveLength(2);

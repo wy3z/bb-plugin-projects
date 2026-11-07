@@ -63,13 +63,49 @@ describe("Grok Bot to project PM and back", () => {
     });
     expect((await fake.run(["replies", "--after", answer.id, "--json"])).json().replies.map((reply: { id: string }) => reply.id)).toEqual([blocker.id]);
 
-    const acked = await fake.run(["ack", answer.id, "--json"]);
+    const acked = await fake.run(["ack", "PIXEL", answer.id, "--json"]);
     expect(acked.exitCode).toBe(0);
-    expect(acked.json()).toEqual({ acked: [answer.id], alreadyAcked: [], unknown: [] });
-    expect((await fake.run(["ack", answer.id, "--json"])).json().alreadyAcked).toEqual([answer.id]);
-    expect((await fake.run(["ack", "rep_unknown"])).exitCode).toBe(1);
+    expect(acked.json()).toEqual({ acked: [answer.id], alreadyAcked: [], unknown: [], otherProject: [] });
+    expect((await fake.run(["ack", "PIXEL", answer.id, "--json"])).json().alreadyAcked).toEqual([answer.id]);
+    expect((await fake.run(["ack", "PIXEL", "rep_unknown"])).exitCode).toBe(1);
     expect((await fake.run(["replies", "PIXEL", "--json"])).json().replies.map((reply: { id: string }) => reply.id)).toEqual([blocker.id]);
     expect((await fake.run(["replies", "OTHER", "--json"])).json()).toEqual({ pending: 0, replies: [] });
+  });
+
+  it("ack is scoped to the project and refused from the lead thread", async () => {
+    const fake = boot();
+    fake.addThread("thr_lead1");
+    fake.addThread("thr_other");
+    await fake.run(["lead", "PIXEL"], "thr_lead1");
+    await fake.run(["lead", "OTHER"], "thr_other");
+    const mine = (await fake.run(["reply", "PIXEL", "pixel news", "--json"], "thr_lead1")).json();
+    const theirs = (await fake.run(["reply", "OTHER", "other news", "--json"], "thr_other")).json();
+    const byLead = await fake.run(["ack", "PIXEL", mine.id], "thr_lead1");
+    expect(byLead.exitCode).not.toBe(0);
+    expect(byLead.stderr ?? byLead.stdout).toContain("cannot acknowledge its own replies");
+    const crossed = await fake.run(["ack", "PIXEL", mine.id, theirs.id, "--json"]);
+    expect(crossed.exitCode).toBe(1);
+    expect(crossed.json()).toEqual({ acked: [mine.id], alreadyAcked: [], unknown: [], otherProject: [theirs.id] });
+    expect((await fake.run(["replies", "OTHER", "--json"])).json().pending).toBe(1);
+  });
+
+  it("send reports a content dedupe, and retry redelivers a failed request through the CLI", async () => {
+    const fake = boot();
+    fake.addThread("thr_lead1");
+    await fake.run(["lead", "PIXEL"], "thr_lead1");
+    fake.faults.send = 1_000;
+    const first = (await fake.run(["send", "PIXEL", "flaky", "lead", "--json"])).json();
+    const repeat = await fake.run(["send", "PIXEL", "flaky", "lead"]);
+    expect(repeat.stdout).toContain("Pass a new --key");
+    expect((await fake.run(["send", "PIXEL", "flaky", "lead", "--json"])).json()).toMatchObject({ id: first.id, duplicate: true, dedupedBy: "content" });
+    const notYet = await fake.run(["retry", "PIXEL", "req_00000000000000000000"]);
+    expect(notYet.exitCode).not.toBe(0);
+    fake.faults.send = 0;
+    const retried = (await fake.run(["retry", "PIXEL", first.id, "--json"])).json();
+    expect(retried).toMatchObject({ id: first.id, state: "delivered", delivery: "sent" });
+    const again = await fake.run(["retry", "PIXEL", first.id]);
+    expect(again.stderr ?? again.stdout).toContain("only failed, held or pending");
+    expect(fake.sent).toHaveLength(1);
   });
 
   it("a lead cannot answer another project's request", async () => {
@@ -106,6 +142,16 @@ describe("Grok Bot to project PM and back", () => {
     expect((await after.run(["requests", "PIXEL", "--json"])).json().requests[0]).toMatchObject({ id: held.id, state: "delivered", deliveredTo: "thr_new" });
     expect((await after.run(["send", "PIXEL", "anyone there?", "--key", "k1", "--json"])).json()).toMatchObject({ id: held.id, duplicate: true });
     expect(after.sent).toHaveLength(1);
+  });
+
+  it("a hidden lead thread holds requests with a notice instead of sending unverifiable deliveries", async () => {
+    const fake = boot();
+    fake.addThread("thr_hidden", { visibility: "hidden" });
+    await fake.run(["lead", "PIXEL", "--thread", "thr_hidden"]);
+    const held = (await fake.run(["send", "PIXEL", "hello", "--json"])).json();
+    expect(held.state).toBe("held");
+    expect((await fake.run(["replies", "--json"])).json().replies[0].text).toContain("is hidden");
+    expect(fake.sent).toHaveLength(0);
   });
 
   it("imports the old key-value inbox as history without redelivering it", async () => {

@@ -62,16 +62,28 @@ export const MIGRATIONS = [
     last_error TEXT
   );
   INSERT INTO wake (id) VALUES (1);`,
+  `ALTER TABLE requests ADD COLUMN failures INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE requests ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE requests ADD COLUMN confirmed_at INTEGER;
+  ALTER TABLE requests ADD COLUMN checked_at INTEGER;
+  ALTER TABLE requests ADD COLUMN check_misses INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE requests ADD COLUMN failed_at INTEGER;
+  UPDATE requests SET confirmed_at = COALESCE(delivered_at, created_at) WHERE state = 'delivered';
+  CREATE INDEX requests_unconfirmed ON requests(state, confirmed_at, checked_at);`,
 ];
 
 export const REQUEST_TEXT_MAX = 8000;
 export const REPLY_TEXT_MAX = 4000;
 export const KEY_MAX = 200;
 export const REPLY_KINDS = ["result", "question", "blocker", "update"] as const;
-export type ReplyKind = (typeof REPLY_KINDS)[number] | "notice";
-export type RequestState = "pending" | "delivering" | "delivered" | "held" | "abandoned";
+export type ReplyKind = (typeof REPLY_KINDS)[number] | "notice" | "failure";
+export type RequestState = "pending" | "delivering" | "delivered" | "held" | "abandoned" | "failed";
 
-const CONTENT_DEDUPE_MS = 24 * 60 * 60_000;
+export const CONTENT_DEDUPE_MS = 10 * 60_000;
+export const MAX_FAILURES = 10;
+export const CHECK_EVERY_MS = 2 * 60_000;
+export const MISSES_BEFORE_FAILING = 2;
+export const RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const LEASE_MS = 5 * 60_000;
 const BACKOFF_BASE_MS = 15_000;
 const BACKOFF_CAP_MS = 15 * 60_000;
@@ -94,6 +106,12 @@ export type Request = {
   deliveredAt: number | null;
   delivery: "sent" | "queued" | "recovered" | null;
   lastError: string | null;
+  failures: number;
+  generation: number;
+  confirmedAt: number | null;
+  checkedAt: number | null;
+  checkMisses: number;
+  failedAt: number | null;
 };
 
 export type Reply = {
@@ -144,6 +162,12 @@ function toRequest(row: Row): Request {
     deliveredAt: numOrNull(row.delivered_at),
     delivery: strOrNull(row.delivery) as Request["delivery"],
     lastError: strOrNull(row.last_error),
+    failures: num(row.failures ?? 0),
+    generation: num(row.generation ?? 0),
+    confirmedAt: numOrNull(row.confirmed_at),
+    checkedAt: numOrNull(row.checked_at),
+    checkMisses: num(row.check_misses ?? 0),
+    failedAt: numOrNull(row.failed_at),
   };
 }
 
@@ -217,7 +241,7 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     return row ? toReply(row) : null;
   };
 
-  function enqueue(input: EnqueueInput): { request: Request; duplicate: boolean } {
+  function enqueue(input: EnqueueInput): { request: Request; duplicate: boolean; dedupedBy: "key" | "content" | null } {
     const now = clock();
     const hash = sha(input.source, input.text, input.ref);
     return db().transaction(() => {
@@ -228,14 +252,14 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
               .prepare("SELECT * FROM requests WHERE project_id = ? AND idem_key IS NULL AND content_hash = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1")
               .get(input.projectId, hash, now - CONTENT_DEDUPE_MS)
       ) as Row | null | undefined;
-      if (existing) return { request: toRequest(existing), duplicate: true };
+      if (existing) return { request: toRequest(existing), duplicate: true, dedupedBy: input.key ? ("key" as const) : ("content" as const) };
       const id = newId("req");
       db()
         .prepare(
           "INSERT INTO requests (id, project_id, prefix, source, text, ref, idem_key, content_hash, created_at, state, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
         )
         .run(id, input.projectId, input.prefix, input.source, input.text, input.ref, input.key, hash, now, now);
-      return { request: getRequest(id)!, duplicate: false };
+      return { request: getRequest(id)!, duplicate: false, dedupedBy: null };
     })();
   }
 
@@ -266,18 +290,131 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
   }
 
   function markDelivered(id: string, delivery: "sent" | "queued" | "recovered"): void {
+    const now = clock();
     db()
-      .prepare("UPDATE requests SET state = 'delivered', delivery = ?, delivered_at = ?, lease_until = NULL, last_error = NULL WHERE id = ? AND state = 'delivering'")
-      .run(delivery, clock(), id);
+      .prepare(
+        "UPDATE requests SET state = 'delivered', delivery = ?, delivered_at = ?, confirmed_at = ?, checked_at = NULL, check_misses = 0, failures = 0, lease_until = NULL, last_error = NULL WHERE id = ? AND state = 'delivering'",
+      )
+      .run(delivery, now, delivery === "queued" ? null : now, id);
   }
 
-  function markRetry(id: string, error: string, attempts?: number): void {
+  function failRequest(id: string, reason: string): boolean {
+    return db().transaction(() => {
+      const row = getRequest(id);
+      if (!row || (row.state !== "delivering" && row.state !== "delivered" && row.state !== "pending")) return false;
+      const now = clock();
+      db()
+        .prepare("UPDATE requests SET state = 'failed', failed_at = ?, lease_until = NULL, last_error = ? WHERE id = ?")
+        .run(now, reason.slice(0, 300), id);
+      addReply({
+        projectId: row.projectId,
+        prefix: row.prefix,
+        leadThreadId: row.targetThreadId,
+        inReplyTo: row.id,
+        kind: "failure",
+        author: "projects",
+        text: `Request ${row.id} did not reach the ${row.prefix} lead: ${reason.slice(0, 300)}. It will not be retried automatically. Retry it with: bb projects retry ${row.prefix} ${row.id}`,
+        key: `failed:${row.id}:${row.generation}`,
+      });
+      return true;
+    })();
+  }
+
+  function markRetry(id: string, error: string): "retry" | "failed" | "gone" {
     const row = getRequest(id);
-    if (!row || row.state !== "delivering") return;
-    const wait = backoffMs(attempts ?? row.attempts);
+    if (!row || row.state !== "delivering") return "gone";
+    const failures = row.failures + 1;
+    if (failures >= MAX_FAILURES) {
+      db().prepare("UPDATE requests SET failures = ? WHERE id = ?").run(failures, id);
+      failRequest(id, `${failures} attempts failed, last: ${error}`);
+      return "failed";
+    }
     db()
-      .prepare("UPDATE requests SET state = 'pending', next_attempt_at = ?, lease_until = NULL, last_error = ? WHERE id = ? AND state = 'delivering'")
-      .run(clock() + wait, error.slice(0, 300), id);
+      .prepare("UPDATE requests SET state = 'pending', failures = ?, next_attempt_at = ?, lease_until = NULL, last_error = ? WHERE id = ? AND state = 'delivering'")
+      .run(failures, clock() + backoffMs(failures), error.slice(0, 300), id);
+    return "retry";
+  }
+
+  function unconfirmedDue(limit = 20): Request[] {
+    const rows = db()
+      .prepare("SELECT * FROM requests WHERE state = 'delivered' AND confirmed_at IS NULL AND (checked_at IS NULL OR checked_at <= ?) ORDER BY delivered_at LIMIT ?")
+      .all(clock() - CHECK_EVERY_MS, limit) as Row[];
+    return rows.map(toRequest);
+  }
+
+  function confirm(id: string): void {
+    db().prepare("UPDATE requests SET confirmed_at = ?, checked_at = ?, check_misses = 0, failures = 0, last_error = NULL WHERE id = ? AND state = 'delivered'").run(clock(), clock(), id);
+  }
+
+  function stillQueued(id: string): void {
+    db().prepare("UPDATE requests SET checked_at = ?, check_misses = 0, failures = 0, last_error = NULL WHERE id = ? AND state = 'delivered'").run(clock(), id);
+  }
+
+  function checkMissed(id: string, reason: string): "waiting" | "failed" {
+    const row = getRequest(id);
+    if (!row || row.state !== "delivered") return "waiting";
+    const misses = row.checkMisses + 1;
+    if (misses >= MISSES_BEFORE_FAILING) {
+      db().prepare("UPDATE requests SET check_misses = ? WHERE id = ?").run(misses, id);
+      failRequest(id, reason);
+      return "failed";
+    }
+    db().prepare("UPDATE requests SET check_misses = ?, checked_at = ?, last_error = ? WHERE id = ? AND state = 'delivered'").run(misses, clock(), reason.slice(0, 300), id);
+    return "waiting";
+  }
+
+  function checkFailed(id: string, error: string): "waiting" | "failed" {
+    const row = getRequest(id);
+    if (!row || row.state !== "delivered") return "waiting";
+    const failures = row.failures + 1;
+    if (failures >= MAX_FAILURES) {
+      db().prepare("UPDATE requests SET failures = ? WHERE id = ?").run(failures, id);
+      failRequest(id, `could not confirm the queued delivery after ${failures} checks, last: ${error}`);
+      return "failed";
+    }
+    db().prepare("UPDATE requests SET failures = ?, checked_at = ?, last_error = ? WHERE id = ? AND state = 'delivered'").run(failures, clock(), error.slice(0, 300), id);
+    return "waiting";
+  }
+
+  function reopen(id: string, reason: string): boolean {
+    return (
+      Number(
+        db()
+          .prepare(
+            "UPDATE requests SET state = 'pending', delivery = NULL, delivered_at = NULL, confirmed_at = NULL, checked_at = NULL, check_misses = 0, next_attempt_at = ?, last_error = ? WHERE id = ? AND state = 'delivered' AND confirmed_at IS NULL",
+          )
+          .run(clock(), reason.slice(0, 300), id).changes,
+      ) === 1
+    );
+  }
+
+  function retry(projectId: string, id: string): { outcome: "requeued" | "unknown" | "not-retryable"; request: Request | null } {
+    return db().transaction(() => {
+      const row = getRequest(id);
+      if (!row || row.projectId !== projectId) return { outcome: "unknown" as const, request: null };
+      if (row.state !== "failed" && row.state !== "held" && row.state !== "pending") return { outcome: "not-retryable" as const, request: row };
+      db()
+        .prepare(
+          "UPDATE requests SET state = 'pending', failures = 0, check_misses = 0, failed_at = NULL, delivery = NULL, delivered_at = NULL, confirmed_at = NULL, checked_at = NULL, next_attempt_at = ?, generation = generation + 1, last_error = NULL WHERE id = ?",
+        )
+        .run(clock(), id);
+      return { outcome: "requeued" as const, request: getRequest(id) };
+    })();
+  }
+
+  function prune(retentionMs = RETENTION_MS): { requests: number; replies: number } {
+    const cutoff = clock() - retentionMs;
+    return db().transaction(() => {
+      const replies = Number(db().prepare("DELETE FROM replies WHERE acked_at IS NOT NULL AND acked_at < ?").run(cutoff).changes);
+      const requests = Number(
+        db()
+          .prepare(
+            "DELETE FROM requests WHERE created_at < ? AND (state IN ('abandoned', 'failed') OR (state = 'delivered' AND confirmed_at IS NOT NULL)) AND id NOT IN (SELECT in_reply_to FROM replies WHERE in_reply_to IS NOT NULL AND acked_at IS NULL)",
+          )
+          .run(cutoff).changes,
+      );
+      return { requests, replies };
+    })();
   }
 
   function markHeld(id: string, reason: string): boolean {
@@ -312,9 +449,13 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     return rows.map(toRequest);
   }
 
+  function unconfirmedCount(projectId: string): number {
+    return num((db().prepare("SELECT COUNT(*) AS n FROM requests WHERE project_id = ? AND state = 'delivered' AND confirmed_at IS NULL").get(projectId) as Row).n);
+  }
+
   function requestCounts(projectId: string): Record<RequestState, number> {
     const rows = db().prepare("SELECT state, COUNT(*) AS n FROM requests WHERE project_id = ? GROUP BY state").all(projectId) as Row[];
-    const counts: Record<RequestState, number> = { pending: 0, delivering: 0, delivered: 0, held: 0, abandoned: 0 };
+    const counts: Record<RequestState, number> = { pending: 0, delivering: 0, delivered: 0, held: 0, abandoned: 0, failed: 0 };
     for (const row of rows) counts[row.state as RequestState] = num(row.n);
     return counts;
   }
@@ -353,13 +494,14 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     return Object.fromEntries(rows.map((row) => [String(row.prefix), num(row.n)]));
   }
 
-  function ack(ids: string[]): { acked: string[]; alreadyAcked: string[]; unknown: string[] } {
-    const out = { acked: [] as string[], alreadyAcked: [] as string[], unknown: [] as string[] };
+  function ack(projectId: string, ids: string[]): { acked: string[]; alreadyAcked: string[]; unknown: string[]; otherProject: string[] } {
+    const out = { acked: [] as string[], alreadyAcked: [] as string[], unknown: [] as string[], otherProject: [] as string[] };
     db().transaction(() => {
       const now = clock();
       for (const id of [...new Set(ids)]) {
         const row = getReply(id);
         if (!row) out.unknown.push(id);
+        else if (row.projectId !== projectId) out.otherProject.push(id);
         else if (row.ackedAt !== null) out.alreadyAcked.push(id);
         else {
           db().prepare("UPDATE replies SET acked_at = ? WHERE id = ? AND acked_at IS NULL").run(now, id);
@@ -409,9 +551,9 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
         added += Number(
           db()
             .prepare(
-              "INSERT OR IGNORE INTO requests (id, project_id, prefix, source, text, ref, idem_key, content_hash, created_at, state, next_attempt_at, delivered_at, delivery, last_error) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+              "INSERT OR IGNORE INTO requests (id, project_id, prefix, source, text, ref, idem_key, content_hash, created_at, state, next_attempt_at, delivered_at, delivery, last_error, confirmed_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .run(id, projectId, prefix, item.source, item.text, item.ref, sha(item.source, item.text, item.ref), at, delivered ? "delivered" : "abandoned", at, delivered ? at : null, delivered ? item.delivery : null, delivered ? null : "legacy: delivery failed, not retried")
+            .run(id, projectId, prefix, item.source, item.text, item.ref, sha(item.source, item.text, item.ref), at, delivered ? "delivered" : "abandoned", at, delivered ? at : null, delivered ? item.delivery : null, delivered ? null : "legacy: delivery failed, not retried", delivered ? at : null)
             .changes,
         );
       }
@@ -429,6 +571,16 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     setTarget,
     markDelivered,
     markRetry,
+    failRequest,
+    unconfirmedDue,
+    confirm,
+    stillQueued,
+    checkMissed,
+    checkFailed,
+    reopen,
+    retry,
+    prune,
+    unconfirmedCount,
     markHeld,
     requeue,
     extendLease,

@@ -1,14 +1,16 @@
 import type { Mailbox, Request } from "./mailbox";
 import type { WakeTransport } from "./transport";
+import type { Sighting } from "./probe";
 
-export type LeadState = "ok" | "missing" | "archived";
+export type LeadState = "ok" | "missing" | "archived" | "hidden";
 
 export type CourierDeps = {
   mailbox: Mailbox;
   leadOf: (projectId: string) => Promise<string | null>;
   leadState: (threadId: string) => Promise<LeadState>;
   sendToThread: (threadId: string, text: string) => Promise<"sent" | "queued">;
-  alreadyDelivered: (threadId: string, requestId: string) => Promise<boolean>;
+  sight: (threadId: string, requestId: string) => Promise<Sighting>;
+  dropQueued: (threadId: string, queuedId: string) => Promise<void>;
   transport: () => Promise<WakeTransport | null>;
   remindMs: () => Promise<number>;
   log: { warn(message: string): void; info(message: string): void };
@@ -39,7 +41,8 @@ export function requestPrompt(request: Pick<Request, "id" | "prefix" | "source" 
   ].join("\n");
 }
 
-const HOLD_TEXT: Record<"no-lead" | "lead-missing" | "lead-archived", (prefix: string, lead: string | null) => string> = {
+const HOLD_TEXT: Record<"no-lead" | "lead-missing" | "lead-archived" | "lead-hidden", (prefix: string, lead: string | null) => string> = {
+  "lead-hidden": (prefix, lead) => `The ${prefix} lead thread ${lead} is hidden, so deliveries to it cannot be verified and this request is waiting. Unhide it or set a visible lead with bb projects lead ${prefix}.`,
   "no-lead": (prefix) => `${prefix} has no project lead, so this request is waiting. Set one with bb projects lead ${prefix}.`,
   "lead-missing": (prefix, lead) => `The ${prefix} lead thread ${lead} no longer exists, so this request is waiting. Set a new lead with bb projects lead ${prefix}.`,
   "lead-archived": (prefix, lead) => `The ${prefix} lead thread ${lead} is archived, so this request is waiting. Unarchive it or set a new lead with bb projects lead ${prefix}.`,
@@ -49,6 +52,8 @@ export function createCourier(deps: CourierDeps) {
   const { mailbox, log } = deps;
   const clock = deps.clock ?? Date.now;
   const inFlight = new Set<string>();
+  const PRUNE_EVERY_MS = 6 * 60 * 60_000;
+  let lastPrune = 0;
   let wakeConfigError: string | null = null;
 
   function hold(request: Request, reason: keyof typeof HOLD_TEXT, lead: string | null) {
@@ -66,23 +71,44 @@ export function createCourier(deps: CourierDeps) {
     if (!duplicate) log.warn(`Request ${request.id} for ${request.prefix} is held: ${reason}${lead ? ` (${lead})` : ""}.`);
   }
 
+  function retryOrFail(id: string, prefix: string, error: string) {
+    if (mailbox.markRetry(id, error) === "failed") log.warn(`Request ${id} for ${prefix} failed for good and was reported to the outer loop: ${error}`);
+  }
+
+  async function drop(threadId: string, queuedId: string, requestId: string) {
+    try {
+      await deps.dropQueued(threadId, queuedId);
+    } catch (cause) {
+      log.warn(`Could not remove request ${requestId}'s stale queued copy from ${threadId}: ${why(cause)}`);
+    }
+  }
+
   async function deliver(id: string): Promise<Request | null> {
     const request = mailbox.claim(id);
     if (!request) return mailbox.getRequest(id);
     inFlight.add(id);
     try {
+      let redelivery = false;
       if (request.targetThreadId) {
-        let landed: boolean;
+        let seen: Sighting;
+        let targetState: LeadState;
         try {
-          landed = await deps.alreadyDelivered(request.targetThreadId, request.id);
+          seen = await deps.sight(request.targetThreadId, request.id);
+          targetState = seen.kind === "queued" ? await deps.leadState(request.targetThreadId) : "ok";
         } catch (cause) {
-          mailbox.markRetry(id, `could not check an earlier attempt: ${why(cause)}`);
+          retryOrFail(id, request.prefix, `could not check an earlier attempt: ${why(cause)}`);
           return mailbox.getRequest(id);
         }
-        if (landed) {
+        if (seen.kind === "landed") {
           mailbox.markDelivered(id, "recovered");
           return mailbox.getRequest(id);
         }
+        if (seen.kind === "queued" && targetState === "ok") {
+          mailbox.markDelivered(id, "queued");
+          return mailbox.getRequest(id);
+        }
+        if (seen.kind === "queued" || seen.kind === "stranded") await drop(request.targetThreadId, seen.queuedId, request.id);
+        redelivery = true;
       }
       let lead: string | null;
       let state: LeadState;
@@ -90,18 +116,18 @@ export function createCourier(deps: CourierDeps) {
         lead = await deps.leadOf(request.projectId);
         state = lead ? await deps.leadState(lead) : "missing";
       } catch (cause) {
-        mailbox.markRetry(id, `could not read the lead: ${why(cause)}`);
+        retryOrFail(id, request.prefix, `could not read the lead: ${why(cause)}`);
         return mailbox.getRequest(id);
       }
       if (!lead) hold(request, "no-lead", null);
-      else if (state !== "ok") hold(request, state === "archived" ? "lead-archived" : "lead-missing", lead);
+      else if (state !== "ok") hold(request, state === "archived" ? "lead-archived" : state === "hidden" ? "lead-hidden" : "lead-missing", lead);
       else {
         mailbox.setTarget(id, lead);
         try {
-          const delivery = await deps.sendToThread(lead, requestPrompt(request, request.targetThreadId !== null));
+          const delivery = await deps.sendToThread(lead, requestPrompt(request, redelivery));
           mailbox.markDelivered(id, delivery);
         } catch (cause) {
-          mailbox.markRetry(id, `send failed: ${why(cause)}`);
+          retryOrFail(id, request.prefix, `send failed: ${why(cause)}`);
         }
       }
       return mailbox.getRequest(id);
@@ -111,11 +137,56 @@ export function createCourier(deps: CourierDeps) {
     }
   }
 
+  async function confirmQueued(): Promise<void> {
+    for (const request of mailbox.unconfirmedDue()) {
+      const target = request.targetThreadId;
+      if (!target) {
+        mailbox.confirm(request.id);
+        continue;
+      }
+      let seen: Sighting;
+      let targetState: LeadState;
+      try {
+        seen = await deps.sight(target, request.id);
+        targetState = await deps.leadState(target);
+      } catch (cause) {
+        if (mailbox.checkFailed(request.id, why(cause)) === "failed") log.warn(`Request ${request.id} for ${request.prefix} could not be confirmed and was reported: ${why(cause)}`);
+        deps.changed?.(request.projectId);
+        continue;
+      }
+      if (seen.kind === "landed") mailbox.confirm(request.id);
+      else if (seen.kind === "queued" && targetState === "ok") mailbox.stillQueued(request.id);
+      else if (seen.kind === "queued") {
+        if (mailbox.reopen(request.id, `the lead thread ${target} is ${targetState} while the request was still queued there`)) {
+          log.info(`Request ${request.id} was queued on ${target}, which is now ${targetState}; delivering it again.`);
+        }
+      } else if (seen.kind === "stranded") mailbox.failRequest(request.id, seen.reason);
+      else if (mailbox.checkMissed(request.id, `the queued copy left ${target}'s queue without being delivered`) === "failed") {
+        log.warn(`Request ${request.id} for ${request.prefix} vanished from ${target}'s queue and was reported.`);
+      }
+      deps.changed?.(request.projectId);
+    }
+  }
+
   async function deliverDue(): Promise<void> {
     for (const request of mailbox.expiredLeases()) {
       if (!inFlight.has(request.id) && mailbox.requeue(request.id)) log.info(`Request ${request.id} lost its delivery attempt; it will be checked and retried.`);
     }
     for (const id of mailbox.dueRequestIds()) await deliver(id);
+  }
+
+  async function retry(projectId: string, id: string) {
+    const result = mailbox.retry(projectId, id);
+    if (result.outcome !== "requeued") return result;
+    return { outcome: result.outcome, request: (await deliver(id)) ?? result.request };
+  }
+
+  function prune(): void {
+    const now = clock();
+    if (now - lastPrune < PRUNE_EVERY_MS) return;
+    lastPrune = now;
+    const removed = mailbox.prune();
+    if (removed.requests || removed.replies) log.info(`Pruned ${removed.requests} old requests and ${removed.replies} acknowledged replies.`);
   }
 
   async function notify(force = false): Promise<"sent" | "idle" | "disabled" | "failed"> {
@@ -162,9 +233,19 @@ export function createCourier(deps: CourierDeps) {
 
   async function tick(): Promise<void> {
     try {
+      await confirmQueued();
+    } catch (cause) {
+      log.warn(`Confirming queued outer-loop requests failed: ${why(cause)}`);
+    }
+    try {
       await deliverDue();
     } catch (cause) {
       log.warn(`Delivering outer-loop requests failed: ${why(cause)}`);
+    }
+    try {
+      prune();
+    } catch (cause) {
+      log.warn(`Pruning the outer-loop mailbox failed: ${why(cause)}`);
     }
     try {
       await notify();
@@ -173,7 +254,7 @@ export function createCourier(deps: CourierDeps) {
     }
   }
 
-  return { deliver, deliverDue, notify, tick, wakeConfigError: () => wakeConfigError };
+  return { deliver, deliverDue, confirmQueued, retry, notify, tick, wakeConfigError: () => wakeConfigError };
 }
 
 export type Courier = ReturnType<typeof createCourier>;

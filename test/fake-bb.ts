@@ -3,6 +3,7 @@ import { migrate } from "./harness";
 
 type Thread = {
   id: string;
+  visibility?: "visible" | "hidden";
   parentThreadId: string | null;
   archivedAt: number | null;
   runtime: { displayStatus: string };
@@ -102,14 +103,13 @@ export function fakeBb(opts: { dbPath?: string; kv?: Map<string, unknown>; setti
           sent.push({ threadId, text: input[0]!.text });
           return { ok: true, delivery: "sent" };
         },
-        queuedMessages: { list: async () => [] },
-        search: async ({ query }: { query: string }) => ({
-          active: {
-            results: [...threads.keys()]
-              .map((id) => ({ thread: { id }, matches: sent.filter((item) => item.threadId === id && item.text.includes(query)).map((item) => ({ text: item.text })) }))
-              .filter((result) => result.matches.length),
-          },
-        }),
+        queuedMessages: { list: async () => [], delete: async () => ({}) },
+        search: async ({ query }: { query: string }) => {
+          const results = [...threads.keys()]
+            .map((id) => ({ thread: { id }, matches: sent.filter((item) => item.threadId === id && item.text.includes(query)).slice(0, 1).map((item) => ({ sourceKind: "user_message", text: item.text.slice(0, 160) })) }))
+            .filter((result) => result.matches.length);
+          return { active: { total: results.length, results }, archived: { total: 0, results: [] } };
+        },
       },
     },
   };

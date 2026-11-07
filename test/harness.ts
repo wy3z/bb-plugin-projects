@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { createMailbox, MIGRATIONS, type SqlDb } from "../src/mailbox";
 import { createCourier, type CourierDeps, type LeadState } from "../src/courier";
 import type { WakeBody } from "../src/transport";
+import { sight, type ProbeApi } from "../src/probe";
+import { capturedSearch, typedQueued, typedSearch } from "../src/probe.fixtures";
 
 export type TestDb = SqlDb & { close(): void };
 
@@ -40,16 +42,47 @@ export class Clock {
 }
 
 export type Sent = { threadId: string; text: string };
+type QueueRow = { id: string; text: string; state: "queued" | "claimed" | "waiting" | "failed_exhausted" | "failed_retrying" | "scheduled"; waitingOn?: { kind: "superseded" } | { kind: "thread-busy" } | null };
 
 export function world(db: SqlDb, clock: Clock) {
   const leads = new Map<string, string | null>([["proj_pixel", "thr_lead1"]]);
   const threads = new Map<string, LeadState>([["thr_lead1", "ok"]]);
+  const busy = new Set<string>();
+  const queues = new Map<string, QueueRow[]>();
+  const timeline = new Map<string, string[]>();
   const sent: Sent[] = [];
   const wakes: WakeBody[] = [];
   const logs: string[] = [];
-  const faults = { send: 0, leadOf: 0, probe: 0, wake: 0, sendHangs: null as null | Promise<void> };
-  const landed = new Set<string>();
+  const faults = { send: 0, leadOf: 0, probe: 0, wake: 0, drop: 0, sendHangs: null as null | Promise<void>, shape: null as null | "search" | "queue", captured: false };
   let transportOn = true;
+  let queuedSeq = 0;
+
+  const landedIn = (threadId: string, text: string) => timeline.set(threadId, [...(timeline.get(threadId) ?? []), text]);
+  const dispatch = (threadId: string) => {
+    const rows = queues.get(threadId) ?? [];
+    queues.set(threadId, rows.filter((row) => row.state === "failed_exhausted" || row.waitingOn?.kind === "superseded"));
+    for (const row of rows) if (row.state !== "failed_exhausted" && row.waitingOn?.kind !== "superseded") landedIn(threadId, row.text);
+  };
+
+  const probeApi: ProbeApi = {
+    queued: async (threadId) => {
+      if (faults.probe > 0) {
+        faults.probe--;
+        throw new Error("queue list unavailable");
+      }
+      if (faults.shape === "queue") return { rows: queues.get(threadId) ?? [] };
+      return typedQueued(threadId, queues.get(threadId) ?? []);
+    },
+    search: async (query, limitPerGroup) => {
+      if (limitPerGroup !== "50") throw new Error(`limitPerGroup must be at most 50, got ${limitPerGroup}`);
+      if (faults.shape === "search") return { results: [] };
+      const hits = [...timeline.entries()].flatMap(([threadId, texts]) =>
+        texts.filter((text) => text.includes(query)).slice(0, 1).map((text) => ({ threadId, archived: threads.get(threadId) === "archived", text: text.slice(0, 160) })),
+      );
+      if (faults.captured && hits[0]) return capturedSearch(hits[0].threadId, hits[0].text);
+      return typedSearch(hits.filter((hit) => threads.get(hit.threadId) !== "hidden"));
+    },
+  };
 
   const mailbox = createMailbox(() => db, clock.now);
   const deps: CourierDeps = {
@@ -69,16 +102,20 @@ export function world(db: SqlDb, clock: Clock) {
         throw new Error("thread send rejected");
       }
       sent.push({ threadId, text });
-      const id = /Request (req_[0-9a-f]+)/.exec(text)?.[1];
-      if (id) landed.add(`${threadId}:${id}`);
+      if (busy.has(threadId)) {
+        queues.set(threadId, [...(queues.get(threadId) ?? []), { id: `qm_${++queuedSeq}`, text, state: "queued", waitingOn: { kind: "thread-busy" } }]);
+        return "queued";
+      }
+      landedIn(threadId, text);
       return "sent";
     },
-    alreadyDelivered: async (threadId, requestId) => {
-      if (faults.probe > 0) {
-        faults.probe--;
-        throw new Error("search unavailable");
+    sight: (threadId, requestId) => sight(probeApi, threadId, requestId),
+    dropQueued: async (threadId, queuedId) => {
+      if (faults.drop > 0) {
+        faults.drop--;
+        throw new Error("queue delete failed");
       }
-      return landed.has(`${threadId}:${requestId}`);
+      queues.set(threadId, (queues.get(threadId) ?? []).filter((row) => row.id !== queuedId));
     },
     transport: async () =>
       transportOn
@@ -101,11 +138,15 @@ export function world(db: SqlDb, clock: Clock) {
     deps,
     leads,
     threads,
+    busy,
+    queues,
+    timeline,
+    dispatch,
+    landedIn,
     sent,
     wakes,
     logs,
     faults,
-    landed,
     setTransport(on: boolean) {
       transportOn = on;
     },

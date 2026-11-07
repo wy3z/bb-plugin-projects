@@ -4,6 +4,7 @@ import type { Project } from "./contracts";
 import { cleanKey, createMailbox, MIGRATIONS, REPLY_KINDS, REPLY_TEXT_MAX, REQUEST_TEXT_MAX, type Reply, type Request, type SqlDb } from "./mailbox";
 import { cleanRef, cleanSource, createCourier, type LeadState } from "./courier";
 import { httpTransport } from "./transport";
+import { sight } from "./probe";
 import { sleep } from "./sleep";
 
 const TICK_MS = 5_000;
@@ -46,21 +47,14 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
   async function leadState(threadId: string): Promise<LeadState> {
     const [thread] = await bb.sdk.threads.list({ threadIds: [threadId], includeHidden: true });
     if (!thread) return "missing";
-    return thread.archivedAt !== null && thread.archivedAt !== undefined ? "archived" : "ok";
+    if (thread.archivedAt !== null && thread.archivedAt !== undefined) return "archived";
+    return (thread as { visibility?: string }).visibility === "hidden" ? "hidden" : "ok";
   }
 
-  async function alreadyDelivered(threadId: string, requestId: string): Promise<boolean> {
-    const queued = await bb.sdk.threads.queuedMessages.list({ threadId });
-    if (JSON.stringify(queued).includes(requestId)) return true;
-    const token = requestId.slice(requestId.indexOf("_") + 1);
-    const found = (await bb.sdk.threads.search({ query: token, limitPerGroup: "50" })) as unknown as Record<
-      string,
-      { results?: { thread: { id: string }; matches: { text: string }[] }[] } | undefined
-    >;
-    return Object.values(found).some((group) =>
-      group?.results?.some((result) => result.thread.id === threadId && result.matches.some((match) => match.text.includes(token))),
-    );
-  }
+  const probeApi = {
+    queued: (threadId: string) => bb.sdk.threads.queuedMessages.list({ threadId }) as Promise<unknown>,
+    search: (query: string, limitPerGroup: string) => bb.sdk.threads.search({ query, limitPerGroup }) as Promise<unknown>,
+  };
 
   const courier = createCourier({
     mailbox,
@@ -70,7 +64,10 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       const sent = await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] });
       return sent.delivery === "queued" ? "queued" : "sent";
     },
-    alreadyDelivered,
+    sight: (threadId, requestId) => sight(probeApi, threadId, requestId),
+    dropQueued: async (threadId, queuedId) => {
+      await bb.sdk.threads.queuedMessages.delete({ threadId, queuedMessageId: queuedId });
+    },
     transport: async () => {
       const values = await settings.get();
       if (!values.wakeEnabled) return null;
@@ -119,7 +116,7 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
           ? request.delivery === "queued"
             ? "queued"
             : "sent"
-          : request.state === "held" || request.state === "abandoned" || request.lastError
+          : request.state === "held" || request.state === "abandoned" || request.state === "failed" || request.lastError
             ? "failed"
             : "queued",
     }));
@@ -140,6 +137,9 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       attempts: request.attempts,
       nextAttemptAt: request.state === "pending" || request.state === "held" ? iso(request.nextAttemptAt) : null,
       lastError: request.lastError,
+      failures: request.failures,
+      confirmedAt: iso(request.confirmedAt),
+      failedAt: iso(request.failedAt),
     };
   }
 
@@ -166,6 +166,8 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         ? `${request.delivery === "queued" ? "queued for" : "sent to"} the ${prefix} lead (${request.targetThreadId})`
         : request.state === "held"
           ? `waiting: ${request.lastError}`
+          : request.state === "failed"
+            ? `failed: ${request.lastError}`
           : `delivery will be retried${request.lastError ? ` (${request.lastError})` : ""}`;
     return `${tag} as ${request.id}: ${where}.\n`;
   }
@@ -194,7 +196,7 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         } catch (cause) {
           throw new PluginCliError(cause instanceof Error ? cause.message : String(cause));
         }
-        const { request, duplicate } = mailbox.enqueue({
+        const { request, duplicate, dedupedBy } = mailbox.enqueue({
           projectId: project.id,
           prefix: project.prefix,
           source: cleanSource(input.options.source),
@@ -206,7 +208,9 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         bb.rpc.experimental_invalidate([`inbox:${project.id}`]);
         return {
           exitCode: 0,
-          stdout: input.options.json ? JSON.stringify({ ...requestView(current), duplicate }) + "\n" : sendLine(current, duplicate, project.prefix),
+          stdout: input.options.json
+            ? JSON.stringify({ ...requestView(current), duplicate, dedupedBy }) + "\n"
+            : sendLine(current, duplicate, project.prefix) + (dedupedBy === "content" ? "Identical text from this source arrived in the last 10 minutes, so it was not sent again. Pass a new --key to send a deliberate repeat.\n" : ""),
         };
       },
     }),
@@ -282,20 +286,45 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       },
     }),
     ack: cliCommand({
-      summary: "Acknowledge replies the outer loop has handled, by id; safe to repeat",
-      positionals: [{ name: "ids", description: "Reply ids (rep_...)", variadic: true, required: true }],
+      summary: "Acknowledge a project's replies the outer loop has handled, by id; safe to repeat",
+      positionals: [
+        { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
+        { name: "ids", description: "Reply ids (rep_...)", variadic: true, required: true },
+      ],
       options: { json },
-      async run(input) {
+      async run(input, ctx) {
+        const project = await deps.resolveProject(input.positionals.project);
+        const meta = await deps.readMeta(project.id);
+        if (ctx.threadId && ctx.threadId === meta.leadThreadId) throw new PluginCliError(`The ${project.prefix} lead cannot acknowledge its own replies; the outer loop does that once it has handled them.`);
         const ids = (input.positionals.ids ?? []).map((id) => id.trim()).filter(Boolean);
         if (!ids.length) throw new PluginCliError("Give at least one reply id.");
         if (ids.length > 200) throw new PluginCliError("Acknowledge at most 200 replies at a time.");
-        const result = mailbox.ack(ids);
+        const result = mailbox.ack(project.id, ids);
+        const problems = [...result.unknown, ...result.otherProject];
         return {
-          exitCode: result.unknown.length ? 1 : 0,
+          exitCode: problems.length ? 1 : 0,
           stdout: input.options.json
             ? JSON.stringify(result) + "\n"
-            : `Acknowledged ${result.acked.length}${result.alreadyAcked.length ? `, ${result.alreadyAcked.length} already` : ""}${result.unknown.length ? `; unknown: ${result.unknown.join(", ")}` : ""}.\n`,
+            : `Acknowledged ${result.acked.length}${result.alreadyAcked.length ? `, ${result.alreadyAcked.length} already` : ""}${result.unknown.length ? `; unknown: ${result.unknown.join(", ")}` : ""}${result.otherProject.length ? `; not ${project.prefix} replies: ${result.otherProject.join(", ")}` : ""}.\n`,
         };
+      },
+    }),
+    retry: cliCommand({
+      summary: "Retry a request that failed or is held, now; it is checked against the lead's thread first so it is not delivered twice",
+      positionals: [
+        { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
+        { name: "id", description: "Request id (req_...)", required: true },
+      ],
+      options: { json },
+      async run(input) {
+        const project = await deps.resolveProject(input.positionals.project);
+        const id = input.positionals.id.trim();
+        const result = await courier.retry(project.id, id);
+        if (result.outcome === "unknown") throw new PluginCliError(`No ${project.prefix} request ${id}.`);
+        if (result.outcome === "not-retryable") throw new PluginCliError(`Request ${id} is ${result.request!.state}; only failed, held or pending requests can be retried.`);
+        bb.rpc.experimental_invalidate([`inbox:${project.id}`]);
+        const view = requestView(result.request!);
+        return { exitCode: 0, stdout: input.options.json ? JSON.stringify(view) + "\n" : sendLine(result.request!, false, project.prefix).replace("Request saved", "Retried") };
       },
     }),
     requests: cliCommand({
