@@ -476,6 +476,7 @@ html.dark .bbp-pi-rose { --bbp-pi-fg: oklch(71.2% 0.194 13.428); }
 .bbp-row-pr,
 .bbp-row-agent {
   display: flex;
+  justify-content: flex-end;
   min-width: 0;
 }
 .bbp-row-pr {
@@ -486,16 +487,17 @@ html.dark .bbp-pi-rose { --bbp-pi-fg: oklch(71.2% 0.194 13.428); }
 }
 .bbp-row-pr .bbp-chip,
 .bbp-row-agent .bbp-chip {
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-width: 0;
+  margin-left: auto;
   overflow: hidden;
-  justify-content: flex-start;
 }
 .bbp-agent-chip > .bbp-dot {
   margin: 0 1px;
 }
 .bbp-row-pr__more {
-  margin-left: auto;
+  margin-left: 2px;
   color: var(--bbp-muted);
 }
 .bbp-row-slots > .bbp-flash {
