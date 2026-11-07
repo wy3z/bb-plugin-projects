@@ -15,6 +15,7 @@ import { useChangeStats, useTaskPullRequests, useTaskThreads, type ThreadInfo } 
 import { Dot, PriorityGlyph, StatusGlyph, formatElapsed } from "./glyphs";
 import { openInTasks } from "./TaskDetail";
 import { usePopover } from "./usePopover";
+import { openPullRequestInPanel } from "./pullRequestLink";
 
 const PR_ICON: Record<PullRequest["state"], string> = {
   open: "GitPullRequest",
@@ -269,7 +270,16 @@ export function TaskCard({
   ) : null;
 
   const prChips = pullRequests.slice(0, 2).map((pr) => (
-    <a className="bbp-chip" data-pr={pr.state} key={pr.url} href={pr.url} target="_blank" rel="noreferrer" title={`${pr.title} (${pr.state})`}>
+    <a
+      className="bbp-chip"
+      data-pr={pr.state}
+      key={pr.url}
+      href={pr.url}
+      target="_blank"
+      rel="noreferrer"
+      title={`${pr.title} (${pr.state})`}
+      onClick={(event) => openPullRequestInPanel(event, pr.url)}
+    >
       <Icon name={PR_ICON[pr.state]} />#{pr.number}
     </a>
   ));
@@ -294,6 +304,7 @@ export function TaskCard({
                     target="_blank"
                     rel="noreferrer"
                     title={pullRequests.map((pr) => `#${pr.number} ${pr.title} (${pr.state})`).join("\n")}
+                    onClick={(event) => openPullRequestInPanel(event, rowPr.url)}
                   >
                     <Icon name={PR_ICON[rowPr.state]} />
                     <span>#{rowPr.number}</span>
