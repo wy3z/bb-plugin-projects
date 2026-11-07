@@ -7,14 +7,18 @@ export function useProjectMeta(projectId: string) {
   const rpc = useRpc<typeof projectsContract>();
   const [meta, setMeta] = useState<ProjectMeta | null>(null);
   const load = useCallback(() => {
-    rpc.call("getMeta", { projectId }).then(setMeta, () => setMeta({ focus: null, focusUpdatedAt: null, leadThreadId: null }));
+    rpc.call("getMeta", { projectId }).then(setMeta, () =>
+      setMeta({ focus: null, focusUpdatedAt: null, leadThreadId: null, sweepMinutes: null, sweepWorkingHours: true, sweepLastAt: null, followPrs: false }),
+    );
   }, [rpc, projectId]);
   useEffect(load, [load]);
   useRealtime(META_CHANGED, (payload) => {
     if ((payload as { projectId?: string } | null)?.projectId === projectId) load();
   });
   const setFocus = (focus: string | null) => rpc.call("setFocus", { projectId, focus }).then(setMeta);
-  return { meta, setFocus };
+  const setLoop = (change: { sweepMinutes?: number | null; sweepWorkingHours?: boolean; followPrs?: boolean }) =>
+    rpc.call("setLoop", { projectId, ...change }).then(setMeta);
+  return { meta, setFocus, setLoop };
 }
 
 export function LeadLink({ threadId, threads }: { threadId: string | null; threads: ReadonlyMap<string, ThreadInfo> }) {

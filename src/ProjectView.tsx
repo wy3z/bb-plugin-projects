@@ -5,6 +5,7 @@ import { TaskCard, type CardContext } from "./Card";
 import { byStatus, useBoardMoves, useNow, usePresets, useProjectData, useThreadIndex, type MoveTask } from "./data";
 import { BoardIcon, ListIcon, STATUS_LABEL, StatusGlyph } from "./glyphs";
 import { FocusCard, LeadLink, useProjectMeta } from "./Focus";
+import { LoopCard } from "./Loop";
 import { TaskDetail } from "./TaskDetail";
 
 type View = "board" | "list";
@@ -68,7 +69,7 @@ export function ProjectView({
   const presets = usePresets();
   const now = useNow();
   const targetEnvironmentId = useCheckoutEnvironment(project, threads);
-  const { meta, setFocus } = useProjectMeta(projectId);
+  const { meta, setFocus, setLoop } = useProjectMeta(projectId);
   const [view, setView] = useState<View>(() => (compact ? "list" : readView("board")));
   const [query, setQuery] = useState("");
   const [showCanceled, setShowCanceled] = useState(() => {
@@ -171,6 +172,7 @@ export function ProjectView({
         </div>
       </div>
       <FocusCard meta={meta} onSave={setFocus} />
+      <LoopCard projectId={projectId} meta={meta} onChange={setLoop} />
       {error ? (
         <div className="bbp-error" role="alert">
           <Icon name="AlertTriangle" />

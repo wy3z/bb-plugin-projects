@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { cliCommand, defineCli, PluginCliError, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { META_CHANGED, projectsContract, type ProjectMeta } from "./src/meta";
+import { createLoop } from "./src/outer-loop";
 import { STATUSES, TASKS_PLUGIN, tasksContract, type Project, type Status, type Task } from "./src/contracts";
 
 const STATUS_WORD: Record<Status, string> = {
@@ -17,7 +18,15 @@ export default function plugin(bb: BbPluginApi) {
 
   async function readMeta(projectId: string): Promise<ProjectMeta> {
     const stored = await bb.storage.kv.get<ProjectMeta>(key(projectId));
-    return { focus: stored?.focus ?? null, focusUpdatedAt: stored?.focusUpdatedAt ?? null, leadThreadId: stored?.leadThreadId ?? null };
+    return {
+      focus: stored?.focus ?? null,
+      focusUpdatedAt: stored?.focusUpdatedAt ?? null,
+      leadThreadId: stored?.leadThreadId ?? null,
+      sweepMinutes: stored?.sweepMinutes ?? null,
+      sweepWorkingHours: stored?.sweepWorkingHours ?? true,
+      sweepLastAt: stored?.sweepLastAt ?? null,
+      followPrs: stored?.followPrs ?? false,
+    };
   }
 
   async function quietLead(threadId: string): Promise<void> {
@@ -95,6 +104,40 @@ export default function plugin(bb: BbPluginApi) {
     }
   })().catch(() => undefined);
 
+  async function leadsWithMeta() {
+    const all = await projects();
+    const out = [];
+    for (const project of all) {
+      const meta = await readMeta(project.id);
+      if (meta.leadThreadId) out.push({ projectId: project.id, prefix: project.prefix, meta });
+    }
+    return out;
+  }
+
+  const loop = createLoop(bb, { leads: leadsWithMeta, writeMeta });
+
+  async function leadOf(ref: string) {
+    const project = await resolveProject(ref);
+    return { project, lead: { projectId: project.id, prefix: project.prefix, meta: await readMeta(project.id) } };
+  }
+
+  function parseEvery(raw: string): number | null {
+    if (/^(off|none|0)$/i.test(raw)) return null;
+    const match = /^(\d+)\s*(m|min|h|hr)?$/i.exec(raw.trim());
+    if (!match) throw new PluginCliError(`Use a duration such as 90m or 2h, or off. Got "${raw}".`);
+    const minutes = Number(match[1]) * (/^h/i.test(match[2] ?? "m") ? 60 : 1);
+    if (minutes < 30 || minutes > 1440) throw new PluginCliError("Sweep interval must be between 30m and 24h.");
+    return minutes;
+  }
+
+  function describeLoop(meta: ProjectMeta): string[] {
+    const every = meta.sweepMinutes === null ? "off" : meta.sweepMinutes % 60 === 0 ? `every ${meta.sweepMinutes / 60}h` : `every ${meta.sweepMinutes}m`;
+    return [
+      `Sweep: ${every}${meta.sweepMinutes !== null && meta.sweepWorkingHours ? " (weekdays 08:00-19:00)" : ""}${meta.sweepLastAt ? `, last ${meta.sweepLastAt}` : ""}`,
+      `Follow PRs: ${meta.followPrs ? "on" : "off"}`,
+    ];
+  }
+
   bb.rpc.register(projectsContract, {
     getMeta: ({ projectId }) => readMeta(projectId),
     listLeads: async () => {
@@ -108,6 +151,11 @@ export default function plugin(bb: BbPluginApi) {
     },
     setFocus: ({ projectId, focus }) => writeMeta(projectId, { focus: focus?.trim() || null, focusUpdatedAt: new Date().toISOString() }),
     setLead: ({ projectId, threadId }) => writeMeta(projectId, { leadThreadId: threadId }),
+    setLoop: ({ projectId, ...change }) =>
+      writeMeta(projectId, Object.fromEntries(Object.entries(change).filter(([, value]) => value !== undefined)) as Partial<ProjectMeta>),
+    getNotes: ({ projectId }) => loop.readNotes(projectId),
+    setNotes: ({ projectId, text }) => loop.writeNotes(projectId, text),
+    listInbox: async ({ projectId }) => ({ items: await loop.readInbox(projectId) }),
   });
 
   const json = { type: "boolean", description: "Emit JSON" } as const;
@@ -133,8 +181,21 @@ export default function plugin(bb: BbPluginApi) {
                 status: task.status,
                 agents: (active.get(task.id) ?? []).map((thread) => ({ threadId: thread.threadId, preset: thread.presetName, status: thread.liveStatus })),
               }));
+            const needsYou = tasks.filter((task) => task.status === "in_review").map((task) => ({ key: task.key, title: task.title }));
             if (input.options.json) {
-              return { exitCode: 0, stdout: JSON.stringify({ project: project.prefix, focus: meta.focus, leadThreadId: meta.leadThreadId, counts, inFlight }) + "\n" };
+              return {
+                exitCode: 0,
+                stdout:
+                  JSON.stringify({
+                    project: project.prefix,
+                    focus: meta.focus,
+                    leadThreadId: meta.leadThreadId,
+                    counts,
+                    inFlight,
+                    needsYou,
+                    loop: { sweepMinutes: meta.sweepMinutes, sweepWorkingHours: meta.sweepWorkingHours, sweepLastAt: meta.sweepLastAt, followPrs: meta.followPrs },
+                  }) + "\n",
+              };
             }
             const lines = [
               `${project.name} (${project.prefix})`,
@@ -169,6 +230,72 @@ export default function plugin(bb: BbPluginApi) {
               exitCode: 0,
               stdout: input.options.json ? JSON.stringify(meta) + "\n" : `${meta.focus ?? "No focus set."}\n`,
             };
+          },
+        }),
+        send: cliCommand({
+          summary: "Hand the project lead new context or work from an outer loop (Grok Bot, a routine, a person); queued if the lead is busy",
+          positionals: [
+            { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
+            { name: "message", description: "What happened and what you want; the lead triages it onto the board", variadic: true, required: true },
+          ],
+          options: {
+            source: { type: "string", description: "Who is sending, shown to the lead and in the inbox (default: outer-loop)" },
+            ref: { type: "string", description: "Link to the origin: a Slack message, issue, PR or post" },
+            json,
+          },
+          async run(input) {
+            const { lead } = await leadOf(input.positionals.project);
+            const text = (input.positionals.message ?? []).join(" ").trim();
+            if (!text) throw new PluginCliError("Say what the lead should know or do.");
+            const source = (input.options.source ?? "outer-loop").trim().slice(0, 40) || "outer-loop";
+            const item = await loop.send(lead, source, text, input.options.ref?.trim() || null);
+            return {
+              exitCode: 0,
+              stdout: input.options.json ? JSON.stringify({ ...item, leadThreadId: lead.meta.leadThreadId }) + "\n" : `${item.delivery === "queued" ? "Queued for" : "Sent to"} the ${lead.prefix} lead (${lead.meta.leadThreadId}).\n`,
+            };
+          },
+        }),
+        notes: cliCommand({
+          summary: "Show or change the project's memory: conventions, preferences and gotchas the lead reads every session",
+          positionals: [{ name: "project", description: "Tracker project prefix, such as PIXEL", required: true }],
+          options: {
+            append: { type: "string", description: "Add a line or paragraph to the end" },
+            set: { type: "string", description: "Replace the notes entirely" },
+            json,
+          },
+          async run(input) {
+            const project = await resolveProject(input.positionals.project);
+            let notes = await loop.readNotes(project.id);
+            if (input.options.set !== undefined) notes = await loop.writeNotes(project.id, input.options.set.trim());
+            else if (input.options.append?.trim()) {
+              notes = await loop.writeNotes(project.id, [notes.text.trimEnd(), input.options.append.trim()].filter(Boolean).join("\n"));
+            }
+            return { exitCode: 0, stdout: input.options.json ? JSON.stringify(notes) + "\n" : `${notes.text || "No notes yet."}\n` };
+          },
+        }),
+        loop: cliCommand({
+          summary: "Show or set the lead's triggers: a scheduled board sweep and following every PR its workers open",
+          positionals: [{ name: "project", description: "Tracker project prefix, such as PIXEL", required: true }],
+          options: {
+            sweep: { type: "string", description: "Sweep interval such as 2h or 90m (30m-24h), or off" },
+            "any-hours": { type: "boolean", description: "Sweep around the clock, not only weekdays 08:00-19:00" },
+            "working-hours": { type: "boolean", description: "Sweep only weekdays 08:00-19:00 (the default)" },
+            "follow-prs": { type: "string", description: "on or off: subscribe the lead to every PR linked to its worker threads" },
+            json,
+          },
+          async run(input) {
+            const project = await resolveProject(input.positionals.project);
+            const change: Partial<ProjectMeta> = {};
+            if (input.options.sweep !== undefined) change.sweepMinutes = parseEvery(input.options.sweep);
+            if (input.options["any-hours"]) change.sweepWorkingHours = false;
+            if (input.options["working-hours"]) change.sweepWorkingHours = true;
+            const follow = input.options["follow-prs"];
+            if (follow !== undefined) {
+              if (!/^(on|off)$/i.test(follow)) throw new PluginCliError("Use --follow-prs on or --follow-prs off.");
+              change.followPrs = /^on$/i.test(follow);
+            }
+            const meta = Object.keys(change).length ? await writeMeta(project.id, change) : await readMeta(project.id);
+            return { exitCode: 0, stdout: input.options.json ? JSON.stringify(meta) + "\n" : describeLoop(meta).join("\n") + "\n" };
           },
         }),
         lead: cliCommand({

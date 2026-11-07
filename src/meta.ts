@@ -1,1 +1,9 @@
-export { META_CHANGED, projectsContract, type ProjectMeta } from "@wy3z/bb-suite/contracts";
+export {
+  META_CHANGED,
+  NOTES_MAX,
+  SWEEP_CHOICES,
+  projectsContract,
+  type InboxItem,
+  type ProjectMeta,
+  type ProjectNotes,
+} from "@wy3z/bb-suite/contracts";
