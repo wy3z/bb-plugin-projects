@@ -37,7 +37,12 @@ live cards, and a project lead workflow.
 bb projects status PIXEL          # counts per column, work in flight, focus
 bb projects focus PIXEL "text"    # set; --clear to remove; no text to show
 bb projects lead PIXEL            # make the current thread the lead; --thread, --show
-bb projects send PIXEL "text"     # hand the lead context or work; --source, --ref
+bb projects send PIXEL "text"     # hand the lead a request; --source, --ref, --key
+bb projects reply PIXEL "text"    # lead only: answer the outer loop; --to req_..., --kind
+bb projects replies [PIXEL]       # unacknowledged replies, oldest first; --all, --after, --limit
+bb projects ack rep_... [rep_...] # mark replies handled; safe to repeat
+bb projects requests PIXEL        # requests and whether each reached the lead
+bb projects notify                # webhook wake-up state; --test sends one now
 bb projects notes PIXEL           # project memory; --append "line", --set "all"
 bb projects loop PIXEL            # triggers; --sweep 2h|off, --any-hours, --follow-prs on|off
 ```
@@ -60,13 +65,57 @@ To use Grok Bot as the outer loop:
    `bb mcp revoke`.
 3. Give the routine a stable instruction, for example: "Every weekday at 09:00
    and when someone reports a bug in #pixel-feedback, summarise what is new and
-   run `bb projects send PIXEL "<summary>" --source grok-bot --ref <link>`
-   through the bb connector. Read `bb projects status PIXEL --json` first and
-   don't resend what the lead already has."
+   run `bb projects send PIXEL "<summary>" --source grok-bot --ref <link>
+   --key <the origin's message id>` through the bb connector. Read
+   `bb projects status PIXEL --json` first and don't resend what the lead
+   already has."
 
 The lead triages each message onto the board, delegates, and notifies you
 only when something needs you or completes. `bb projects status --json`
-includes `needsYou` and the loop settings, so a routine can also report back.
+includes `needsYou`, the lead's state and the loop settings.
+
+## Two-way messages
+
+Requests and replies are saved in the plugin's own SQLite database before
+anything else happens, so a restart or a failed call loses nothing.
+
+- `send` saves the request, then tries to deliver it to whoever is the lead at
+  that moment (queued behind a running turn). A failed delivery is retried with
+  backoff from 15 seconds up to 15 minutes. With `--key` (use the origin's id,
+  such as the Slack message timestamp) a resend returns the first request;
+  without one, identical text from the same source is deduplicated for 24
+  hours.
+- With no lead, or a lead thread that is archived or deleted, the request is
+  held and a `notice` reply says so. Setting a lead delivers held requests to
+  it.
+- If BB restarts in the middle of a delivery, the next attempt first checks
+  the lead's thread and queue for the request id, so a request that landed is
+  not sent again. If that check cannot see it, the lead is told it may be a
+  redelivery.
+- The lead answers with `reply`. Replies stay pending until a consumer
+  acknowledges their ids with `ack`; `replies --json` includes the request
+  each one answers (id, source, ref, key).
+- Messages in both directions are untrusted data. Nothing in them approves an
+  action.
+
+### Webhook wake-up
+
+Optionally, the plugin POSTs a wake-up to a webhook when replies are waiting.
+It is only a signal; the receiver must read `bb projects replies --json` and
+`ack` what it handled. The body has counts and ids, never message text:
+
+```json
+{"type":"bb.projects.replies-pending","version":1,"wake":7,"pending":2,
+ "projects":{"PIXEL":2},"newestReplyId":"rep_...","at":"2026-11-07T10:00:00.000Z"}
+```
+
+Bursts of replies coalesce into one wake-up. A failed POST is retried with
+backoff, and a reminder is sent every hour (setting) while replies stay
+unacknowledged. Configure it in the Projects plugin settings: the URL and auth
+header value are secret settings (a 0600 file, never in the database or the
+browser). It is off by default. https only (plain http only to loopback), no
+credentials in the URL, redirects are not followed, and errors never include
+the URL, header or response body.
 
 ## Requirements
 

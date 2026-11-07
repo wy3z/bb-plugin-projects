@@ -2,6 +2,7 @@ import { z } from "zod";
 import { cliCommand, defineCli, PluginCliError, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { META_CHANGED, projectsContract, type ProjectMeta } from "./src/meta";
 import { createLoop } from "./src/outer-loop";
+import { createMessaging } from "./src/messaging";
 import { STATUSES, TASKS_PLUGIN, tasksContract, type Project, type Status, type Task } from "./src/contracts";
 
 const STATUS_WORD: Record<Status, string> = {
@@ -50,10 +51,21 @@ export default function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function writeMeta(projectId: string, change: Partial<ProjectMeta>): Promise<ProjectMeta> {
-    const next = { ...(await readMeta(projectId)), ...change };
+  const metaWrites = new Map<string, Promise<unknown>>();
+
+  function writeMeta(projectId: string, change: Partial<ProjectMeta>): Promise<ProjectMeta> {
+    const previous = metaWrites.get(projectId) ?? Promise.resolve();
+    const run = previous.then(() => applyMeta(projectId, change));
+    metaWrites.set(projectId, run.catch(() => undefined));
+    return run;
+  }
+
+  async function applyMeta(projectId: string, change: Partial<ProjectMeta>): Promise<ProjectMeta> {
+    const before = await readMeta(projectId);
+    const next = { ...before, ...change };
     await bb.storage.kv.set(key(projectId), next);
     if (change.leadThreadId) void quietLead(change.leadThreadId);
+    if ("leadThreadId" in change && change.leadThreadId !== before.leadThreadId) messaging.leadChanged(projectId);
     bb.realtime.publish(META_CHANGED, { projectId });
     bb.rpc.experimental_invalidate(["leads", `meta:${projectId}`]);
     return next;
@@ -115,11 +127,7 @@ export default function plugin(bb: BbPluginApi) {
   }
 
   const loop = createLoop(bb, { leads: leadsWithMeta, writeMeta });
-
-  async function leadOf(ref: string) {
-    const project = await resolveProject(ref);
-    return { project, lead: { projectId: project.id, prefix: project.prefix, meta: await readMeta(project.id) } };
-  }
+  const messaging = createMessaging(bb, { resolveProject, projects, readMeta });
 
   function parseEvery(raw: string): number | null {
     if (/^(off|none|0)$/i.test(raw)) return null;
@@ -155,7 +163,7 @@ export default function plugin(bb: BbPluginApi) {
       writeMeta(projectId, Object.fromEntries(Object.entries(change).filter(([, value]) => value !== undefined)) as Partial<ProjectMeta>),
     getNotes: ({ projectId }) => loop.readNotes(projectId),
     setNotes: ({ projectId, text }) => loop.writeNotes(projectId, text),
-    listInbox: async ({ projectId }) => ({ items: await loop.readInbox(projectId) }),
+    listInbox: async ({ projectId }) => ({ items: messaging.inboxItems(projectId) }),
   });
 
   const json = { type: "boolean", description: "Emit JSON" } as const;
@@ -182,6 +190,9 @@ export default function plugin(bb: BbPluginApi) {
                 agents: (active.get(task.id) ?? []).map((thread) => ({ threadId: thread.threadId, preset: thread.presetName, status: thread.liveStatus })),
               }));
             const needsYou = tasks.filter((task) => task.status === "in_review").map((task) => ({ key: task.key, title: task.title }));
+            const leadStatus = meta.leadThreadId ? await loop.leadStatus(meta.leadThreadId).catch(() => "unknown" as const) : null;
+            const requests = messaging.mailbox.requestCounts(project.id);
+            const repliesPending = messaging.mailbox.pendingCounts()[project.prefix] ?? 0;
             if (input.options.json) {
               return {
                 exitCode: 0,
@@ -190,16 +201,20 @@ export default function plugin(bb: BbPluginApi) {
                     project: project.prefix,
                     focus: meta.focus,
                     leadThreadId: meta.leadThreadId,
+                    leadStatus,
                     counts,
                     inFlight,
                     needsYou,
                     loop: { sweepMinutes: meta.sweepMinutes, sweepWorkingHours: meta.sweepWorkingHours, sweepLastAt: meta.sweepLastAt, followPrs: meta.followPrs },
+                    messages: { requestsWaiting: requests.pending + requests.delivering + requests.held, requestsHeld: requests.held, repliesPending },
                   }) + "\n",
               };
             }
             const lines = [
               `${project.name} (${project.prefix})`,
               meta.focus ? `Focus: ${meta.focus}` : "Focus: none set",
+              ...(leadStatus === "missing" || leadStatus === "archived" ? [`Lead: ${meta.leadThreadId} is ${leadStatus}`] : []),
+              ...(requests.held ? [`${requests.held} outer-loop request${requests.held === 1 ? "" : "s"} waiting for a lead`] : []),
               STATUSES.filter((status) => counts[status]! > 0).map((status) => `${STATUS_WORD[status]} ${counts[status]}`).join(" · "),
               "",
               inFlight.length === 0 ? "Nothing in progress or for review." : "In flight:",
@@ -232,29 +247,7 @@ export default function plugin(bb: BbPluginApi) {
             };
           },
         }),
-        send: cliCommand({
-          summary: "Hand the project lead new context or work from an outer loop (Grok Bot, a routine, a person); queued if the lead is busy",
-          positionals: [
-            { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
-            { name: "message", description: "What happened and what you want; the lead triages it onto the board", variadic: true, required: true },
-          ],
-          options: {
-            source: { type: "string", description: "Who is sending, shown to the lead and in the inbox (default: outer-loop)" },
-            ref: { type: "string", description: "Link to the origin: a Slack message, issue, PR or post" },
-            json,
-          },
-          async run(input) {
-            const { lead } = await leadOf(input.positionals.project);
-            const text = (input.positionals.message ?? []).join(" ").trim();
-            if (!text) throw new PluginCliError("Say what the lead should know or do.");
-            const source = (input.options.source ?? "outer-loop").trim().slice(0, 40) || "outer-loop";
-            const item = await loop.send(lead, source, text, input.options.ref?.trim() || null);
-            return {
-              exitCode: 0,
-              stdout: input.options.json ? JSON.stringify({ ...item, leadThreadId: lead.meta.leadThreadId }) + "\n" : `${item.delivery === "queued" ? "Queued for" : "Sent to"} the ${lead.prefix} lead (${lead.meta.leadThreadId}).\n`,
-            };
-          },
-        }),
+        ...messaging.commands,
         notes: cliCommand({
           summary: "Show or change the project's memory: conventions, preferences and gotchas the lead reads every session",
           positionals: [{ name: "project", description: "Tracker project prefix, such as PIXEL", required: true }],

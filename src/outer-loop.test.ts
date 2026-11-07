@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inboxPrompt, inWorkingHours, sweepDue, sweepPrompt } from "./outer-loop";
+import { inWorkingHours, leadStatusOf, sweepDue, sweepPrompt } from "./outer-loop";
 import type { ProjectMeta } from "./meta";
 
 const base: ProjectMeta = {
@@ -40,12 +40,20 @@ describe("sweepDue", () => {
   });
 });
 
-describe("prompts", () => {
-  it("label the sweep and the outer-loop source for the lead", () => {
+describe("sweepPrompt", () => {
+  it("labels the sweep for the lead", () => {
     expect(sweepPrompt("PIXEL").split("\n")[0]).toBe("[Scheduled sweep] PIXEL");
-    expect(inboxPrompt("PIXEL", "grok-bot", "  Login 500s on Samsung ", "https://x.test/1")).toBe(
-      "[Outer loop · grok-bot] PIXEL\n\nLogin 500s on Samsung\n\nRef: https://x.test/1",
-    );
-    expect(inboxPrompt("PIXEL", "grok-bot", "No ref", null)).not.toContain("Ref:");
+  });
+});
+
+describe("leadStatusOf", () => {
+  const thread = { archivedAt: null, runtime: { displayStatus: "idle" }, queuedWork: "none", hasPendingInteraction: false };
+  it("tells missing and archived leads apart from busy ones", () => {
+    expect(leadStatusOf(undefined)).toBe("missing");
+    expect(leadStatusOf({ ...thread, archivedAt: 1 })).toBe("archived");
+    expect(leadStatusOf({ ...thread, runtime: { displayStatus: "active" } })).toBe("busy");
+    expect(leadStatusOf({ ...thread, queuedWork: "queued" })).toBe("busy");
+    expect(leadStatusOf({ ...thread, hasPendingInteraction: true })).toBe("busy");
+    expect(leadStatusOf(thread)).toBe("idle");
   });
 });

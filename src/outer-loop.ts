@@ -1,10 +1,11 @@
 import { z } from "zod";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { NOTES_MAX, type InboxItem, type ProjectMeta, type ProjectNotes } from "./meta";
+import { NOTES_MAX, type ProjectMeta, type ProjectNotes } from "./meta";
+import { sleep } from "./sleep";
 
-const INBOX_LIMIT = 30;
 const FOLLOW_EVERY_MS = 5 * 60_000;
 const TICK_MS = 60_000;
+const SWEEP_RETRY_MS = 5 * 60_000;
 const FAMILY_DEPTH = 4;
 const PULL_REQUESTS = "pull-requests";
 
@@ -37,14 +38,17 @@ export function sweepPrompt(prefix: string): string {
   ].join("\n");
 }
 
-export function inboxPrompt(prefix: string, source: string, text: string, ref: string | null): string {
-  return [`[Outer loop · ${source}] ${prefix}`, "", text.trim(), ...(ref ? ["", `Ref: ${ref}`] : [])].join("\n");
+export type LeadStatus = "idle" | "busy" | "missing" | "archived";
+
+export function leadStatusOf(thread: { archivedAt: unknown; runtime: { displayStatus: string }; queuedWork: string; hasPendingInteraction: boolean } | undefined): LeadStatus {
+  if (!thread) return "missing";
+  if (thread.archivedAt !== null && thread.archivedAt !== undefined) return "archived";
+  return thread.runtime.displayStatus !== "idle" || thread.queuedWork !== "none" || thread.hasPendingInteraction ? "busy" : "idle";
 }
 
 export function createLoop(bb: BbPluginApi, deps: LoopDeps) {
   const notesKey = (projectId: string) => `notes:${projectId}`;
-  const inboxKey = (projectId: string) => `inbox:${projectId}`;
-  const followedKey = (projectId: string) => `followed:${projectId}`;
+  const followedKey = (projectId: string, leadId: string) => `followed:${projectId}:${leadId}`;
 
   async function readNotes(projectId: string): Promise<ProjectNotes> {
     const stored = await bb.storage.kv.get<ProjectNotes>(notesKey(projectId));
@@ -59,39 +63,39 @@ export function createLoop(bb: BbPluginApi, deps: LoopDeps) {
     return next;
   }
 
-  async function readInbox(projectId: string): Promise<InboxItem[]> {
-    return (await bb.storage.kv.get<InboxItem[]>(inboxKey(projectId))) ?? [];
-  }
-
   async function deliver(threadId: string, text: string): Promise<"sent" | "queued"> {
     const sent = await bb.sdk.threads.send({ threadId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] });
     return sent.delivery === "queued" ? "queued" : "sent";
   }
 
-  async function send(lead: Lead, source: string, text: string, ref: string | null): Promise<InboxItem> {
-    if (!lead.meta.leadThreadId) throw new Error(`${lead.prefix} has no project lead. Set one with bb projects lead ${lead.prefix}.`);
-    let delivery: InboxItem["delivery"] = "failed";
-    try {
-      delivery = await deliver(lead.meta.leadThreadId, inboxPrompt(lead.prefix, source, text, ref));
-    } finally {
-      const item: InboxItem = { at: new Date().toISOString(), source, text: text.trim().slice(0, 2000), ref, delivery };
-      await bb.storage.kv.set(inboxKey(lead.projectId), [item, ...(await readInbox(lead.projectId))].slice(0, INBOX_LIMIT));
-      bb.rpc.experimental_invalidate([`inbox:${lead.projectId}`]);
-    }
-    return (await readInbox(lead.projectId))[0]!;
+  async function leadStatus(threadId: string): Promise<LeadStatus> {
+    const [thread] = await bb.sdk.threads.list({ threadIds: [threadId], includeHidden: true });
+    return leadStatusOf(thread);
   }
 
-  async function leadIsBusy(threadId: string): Promise<boolean> {
-    const [thread] = await bb.sdk.threads.list({ threadIds: [threadId], includeHidden: true });
-    if (!thread) return true;
-    return thread.archivedAt !== null || thread.runtime.displayStatus !== "idle" || thread.queuedWork !== "none" || thread.hasPendingInteraction;
-  }
+  const sweepRetryAt = new Map<string, number>();
+  const reported = new Map<string, LeadStatus>();
 
   async function sweep(lead: Lead, now: Date) {
     const threadId = lead.meta.leadThreadId!;
-    if (await leadIsBusy(threadId)) return;
+    if ((sweepRetryAt.get(lead.projectId) ?? 0) > now.getTime()) return;
+    const status = await leadStatus(threadId);
+    const reportKey = `${lead.projectId}:${threadId}`;
+    if (status === "missing" || status === "archived") {
+      if (reported.get(reportKey) !== status) bb.log.warn(`Sweep for ${lead.prefix} skipped: the lead thread ${threadId} is ${status}.`);
+      reported.set(reportKey, status);
+      return;
+    }
+    reported.delete(reportKey);
+    if (status === "busy") return;
+    try {
+      await deliver(threadId, sweepPrompt(lead.prefix));
+    } catch (cause) {
+      sweepRetryAt.set(lead.projectId, now.getTime() + SWEEP_RETRY_MS);
+      throw cause;
+    }
+    sweepRetryAt.delete(lead.projectId);
     await deps.writeMeta(lead.projectId, { sweepLastAt: now.toISOString() });
-    await deliver(threadId, sweepPrompt(lead.prefix));
   }
 
   async function family(rootId: string): Promise<string[]> {
@@ -113,7 +117,7 @@ export function createLoop(bb: BbPluginApi, deps: LoopDeps) {
 
   async function follow(lead: Lead) {
     const leadId = lead.meta.leadThreadId!;
-    const seen = new Set((await bb.storage.kv.get<string[]>(followedKey(lead.projectId))) ?? []);
+    const seen = new Set((await bb.storage.kv.get<string[]>(followedKey(lead.projectId, leadId))) ?? []);
     const fresh = new Set<string>();
     for (const threadId of await family(leadId)) {
       const { urls } = await bb.sdk.plugins.callRpc({
@@ -133,22 +137,30 @@ export function createLoop(bb: BbPluginApi, deps: LoopDeps) {
       outputSchema: z.unknown(),
     });
     for (const url of urls) seen.add(url.toLowerCase());
-    await bb.storage.kv.set(followedKey(lead.projectId), [...seen].slice(-2000));
+    await bb.storage.kv.set(followedKey(lead.projectId, leadId), [...seen].slice(-2000));
   }
 
   const lastFollow = new Map<string, number>();
 
   async function tick() {
     const now = new Date();
-    for (const lead of await deps.leads()) {
+    let leads: Lead[];
+    try {
+      leads = await deps.leads();
+    } catch (cause) {
+      bb.log.warn(`Outer loop could not list project leads: ${cause instanceof Error ? cause.message : String(cause)}`);
+      return;
+    }
+    for (const lead of leads) {
       if (!lead.meta.leadThreadId) continue;
       try {
         if (sweepDue(lead.meta, now)) await sweep(lead, now);
       } catch (cause) {
         bb.log.warn(`Sweep for ${lead.prefix} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
-      if (!lead.meta.followPrs || now.getTime() - (lastFollow.get(lead.projectId) ?? 0) < FOLLOW_EVERY_MS) continue;
-      lastFollow.set(lead.projectId, now.getTime());
+      const followKey = `${lead.projectId}:${lead.meta.leadThreadId}`;
+      if (!lead.meta.followPrs || now.getTime() - (lastFollow.get(followKey) ?? 0) < FOLLOW_EVERY_MS) continue;
+      lastFollow.set(followKey, now.getTime());
       try {
         await follow(lead);
       } catch (cause) {
@@ -160,17 +172,11 @@ export function createLoop(bb: BbPluginApi, deps: LoopDeps) {
   bb.background.service("outer-loop", {
     async start(signal) {
       while (!signal.aborted) {
-        await tick();
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, TICK_MS);
-          signal.addEventListener("abort", () => {
-            clearTimeout(timer);
-            resolve();
-          }, { once: true });
-        });
+        await tick().catch((cause) => bb.log.warn(`Outer loop tick failed: ${cause instanceof Error ? cause.message : String(cause)}`));
+        await sleep(TICK_MS, signal);
       }
     },
   });
 
-  return { readNotes, writeNotes, readInbox, send };
+  return { readNotes, writeNotes, leadStatus };
 }
