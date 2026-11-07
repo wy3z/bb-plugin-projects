@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { experimental_Icon as Icon, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { META_CHANGED, projectsContract, type ProjectMeta } from "./meta";
 import type { ThreadInfo } from "./data";
+import { Dot } from "./glyphs";
 
 export function useProjectMeta(projectId: string) {
   const rpc = useRpc<typeof projectsContract>();
@@ -35,7 +36,7 @@ export function LeadLink({ threadId, threads }: { threadId: string | null; threa
       title={`Open the project lead (${state})${lead?.title ? `: ${lead.title}` : ""}`}
       onClick={(event) => navigate.toThread(threadId, event.ctrlKey || event.metaKey ? { split: true } : undefined)}
     >
-      <span className="bbp-dot" data-tone={tone} aria-hidden="true" />
+      <Dot tone={tone} />
       <span>Lead</span>
     </button>
   );

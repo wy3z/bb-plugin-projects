@@ -282,9 +282,6 @@
   border-radius: var(--bbs-pill-radius);
   background: color-mix(in srgb, var(--foreground) 30%, transparent);
 }
-.bbp-dot[data-tone="working"] {
-  background: var(--bbp-accent);
-}
 .bbp-dot[data-tone="input"] {
   background: var(--bbp-amber);
 }
@@ -1377,13 +1374,6 @@ header[data-bb-projects-tabs] [data-testid="app-page-header-content-row"] > div 
   width: var(--bbs-icon);
   height: var(--bbs-icon);
   flex-shrink: 0;
-}
-.bbp-tabs__spin {
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-  animation: spin 1s linear infinite;
-  color: var(--bbs-text-tertiary);
 }
 .bbp-tabs__dot {
   width: 6px;

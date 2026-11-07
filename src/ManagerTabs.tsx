@@ -129,7 +129,7 @@ const WORKING = new Set(["runtime", "workflow", "background-agent", "background-
 function TabStatus({ thread }: { thread: PluginSidebarThread | undefined }) {
   if (!thread) return null;
   const { indicator } = thread;
-  if (WORKING.has(indicator)) return <Icon name="Loading" className="bbp-tabs__spin size-3" aria-label="Working" />;
+  if (WORKING.has(indicator)) return <span className="bbs-live-orb" role="img" aria-label="Working" />;
   if (indicator === "waiting-for-input") return <span className="bbp-tabs__dot" data-tone="input" aria-label="Needs your input" />;
   if (indicator === "unread-error" || indicator === "queued-failed") return <span className="bbp-tabs__dot" data-tone="failed" aria-label="Failed" />;
   if (thread.isUnread) return <span className="bbp-tabs__dot" data-tone="unread" aria-label="Unread" />;

@@ -91,6 +91,7 @@ export function PriorityGlyph({ priority }: { priority: Priority }) {
 }
 
 export function Dot({ tone }: { tone: "working" | "input" | "failed" | "idle" }) {
+  if (tone === "working") return <span className="bbs-live-orb" aria-hidden="true" />;
   return <span className="bbp-dot" data-tone={tone} aria-hidden="true" />;
 }
 
