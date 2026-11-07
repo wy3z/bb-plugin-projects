@@ -32,7 +32,7 @@ export function cleanRef(raw: string | null | undefined): string | null {
 export function requestPrompt(request: Pick<Request, "id" | "prefix" | "source" | "text" | "ref">, redelivery: boolean): string {
   return [
     `[Outer loop · ${request.source}] ${request.prefix}`,
-    `Request ${request.id}. When there is a result, a question or a blocker the sender needs, answer with: bb projects reply ${request.prefix} --to ${request.id} --kind result|question|blocker "<text>"`,
+    `Request ${request.id} from ${request.source}. When there is a result, a question or a blocker ${request.source} needs, answer with: bb projects reply ${request.prefix} --to ${request.id} --kind result|question|blocker "<text>" (it goes only to ${request.source})`,
     ...(redelivery ? [`Redelivery: if you already have request ${request.id}, do not act on it twice.`] : []),
     ...(request.ref ? [`Ref: ${request.ref}`] : []),
     "",
@@ -219,6 +219,7 @@ export function createCourier(deps: CourierDeps) {
         wake: claimed.wanted,
         pending,
         projects: counts,
+        consumers: mailbox.pendingByConsumer(),
         newestReplyId: newest?.id ?? null,
         at: new Date(now).toISOString(),
       });

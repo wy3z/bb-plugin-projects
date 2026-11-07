@@ -85,6 +85,7 @@ export function world(db: SqlDb, clock: Clock) {
   };
 
   const mailbox = createMailbox(() => db, clock.now);
+  mailbox.touchConsumer("proj_pixel", "grok-bot");
   const deps: CourierDeps = {
     mailbox,
     leadOf: async (projectId) => {

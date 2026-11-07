@@ -70,7 +70,32 @@ export const MIGRATIONS = [
   ALTER TABLE requests ADD COLUMN failed_at INTEGER;
   UPDATE requests SET confirmed_at = COALESCE(delivered_at, created_at) WHERE state = 'delivered';
   CREATE INDEX requests_unconfirmed ON requests(state, confirmed_at, checked_at);`,
+  `ALTER TABLE replies ADD COLUMN audience TEXT;
+  CREATE TABLE consumers (
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY (project_id, name)
+  );
+  CREATE TABLE reply_acks (
+    reply_id TEXT NOT NULL,
+    consumer TEXT NOT NULL,
+    acked_at INTEGER NOT NULL,
+    PRIMARY KEY (reply_id, consumer)
+  );
+  CREATE INDEX replies_project_seq ON replies(project_id, seq);
+  UPDATE replies SET audience = (SELECT source FROM requests WHERE requests.id = replies.in_reply_to) WHERE in_reply_to IS NOT NULL;
+  INSERT OR IGNORE INTO consumers (project_id, name, first_seen, last_seen) SELECT project_id, source, 0, MAX(created_at) FROM requests GROUP BY project_id, source;
+  INSERT OR IGNORE INTO reply_acks (reply_id, consumer, acked_at) SELECT r.id, c.name, r.acked_at FROM replies r JOIN consumers c ON c.project_id = r.project_id WHERE r.acked_at IS NOT NULL AND (r.audience IS NULL OR r.audience = c.name);`,
 ];
+
+export const CONSUMER_MAX = 40;
+export const DEFAULT_CONSUMER = "outer-loop";
+
+export function cleanConsumer(raw: string | null | undefined): string {
+  return (raw ?? "").replace(/[^A-Za-z0-9._@-]/g, "").slice(0, CONSUMER_MAX);
+}
 
 export const REQUEST_TEXT_MAX = 8000;
 export const REPLY_TEXT_MAX = 4000;
@@ -121,12 +146,17 @@ export type Reply = {
   prefix: string;
   leadThreadId: string | null;
   inReplyTo: string | null;
+  audience: string | null;
   kind: ReplyKind;
   author: string;
   text: string;
   createdAt: number;
   ackedAt: number | null;
 };
+
+export type Recipient = { consumer: string; ackedAt: number | null };
+export type Consumer = { projectId: string; name: string; firstSeen: number; lastSeen: number };
+export type AckResult = { acked: string[]; alreadyAcked: string[]; unknown: string[]; otherProject: string[]; notYours: string[] };
 
 export type Wake = {
   wanted: number;
@@ -179,13 +209,18 @@ function toReply(row: Row): Reply {
     prefix: String(row.prefix),
     leadThreadId: strOrNull(row.lead_thread_id),
     inReplyTo: strOrNull(row.in_reply_to),
+    audience: strOrNull(row.audience),
     kind: row.kind as ReplyKind,
     author: String(row.author),
     text: String(row.text),
     createdAt: num(row.created_at),
-    ackedAt: numOrNull(row.acked_at),
+    ackedAt: numOrNull(row.my_acked_at ?? row.all_acked_at ?? null),
   };
 }
+
+const RECIPIENT = "(r.audience = c.name OR (r.audience IS NULL AND r.created_at >= c.first_seen))";
+const ACKED_BY_C = "EXISTS (SELECT 1 FROM reply_acks a WHERE a.reply_id = r.id AND a.consumer = c.name)";
+const WAITING = `EXISTS (SELECT 1 FROM consumers c WHERE c.project_id = r.project_id AND ${RECIPIENT} AND NOT ${ACKED_BY_C})`;
 
 function toWake(row: Row): Wake {
   return {
@@ -224,6 +259,7 @@ export type ReplyInput = {
   prefix: string;
   leadThreadId: string | null;
   inReplyTo: string | null;
+  audience?: string | null;
   kind: ReplyKind;
   author: string;
   text: string;
@@ -241,6 +277,46 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     return row ? toReply(row) : null;
   };
 
+  function touchConsumer(projectId: string, name: string): void {
+    const now = clock();
+    db()
+      .prepare("INSERT INTO consumers (project_id, name, first_seen, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT (project_id, name) DO UPDATE SET last_seen = excluded.last_seen")
+      .run(projectId, name, now, now);
+  }
+
+  function consumers(projectId: string): Consumer[] {
+    const rows = db().prepare("SELECT * FROM consumers WHERE project_id = ? ORDER BY first_seen, rowid").all(projectId) as Row[];
+    return rows.map((row) => ({ projectId: String(row.project_id), name: String(row.name), firstSeen: num(row.first_seen), lastSeen: num(row.last_seen) }));
+  }
+
+  function hasConsumer(projectId: string, name: string): boolean {
+    return Boolean(db().prepare("SELECT 1 FROM consumers WHERE project_id = ? AND name = ?").get(projectId, name));
+  }
+
+  function forgetConsumer(projectId: string, name: string): { forgotten: boolean; acked: number } {
+    return db().transaction(() => {
+      if (!hasConsumer(projectId, name)) return { forgotten: false, acked: 0 };
+      const acked = Number(
+        db()
+          .prepare(
+            `INSERT OR IGNORE INTO reply_acks (reply_id, consumer, acked_at) SELECT r.id, c.name, ? FROM replies r JOIN consumers c ON c.project_id = r.project_id WHERE c.project_id = ? AND c.name = ? AND ${RECIPIENT}`,
+          )
+          .run(clock(), projectId, name).changes,
+      );
+      db().prepare("DELETE FROM consumers WHERE project_id = ? AND name = ?").run(projectId, name);
+      return { forgotten: true, acked };
+    })();
+  }
+
+  function recipients(replyId: string): Recipient[] {
+    const rows = db()
+      .prepare(
+        `SELECT c.name AS consumer, (SELECT a.acked_at FROM reply_acks a WHERE a.reply_id = r.id AND a.consumer = c.name) AS acked_at FROM replies r JOIN consumers c ON c.project_id = r.project_id WHERE r.id = ? AND ${RECIPIENT} ORDER BY c.first_seen, c.rowid`,
+      )
+      .all(replyId) as Row[];
+    return rows.map((row) => ({ consumer: String(row.consumer), ackedAt: numOrNull(row.acked_at) }));
+  }
+
   function enqueue(input: EnqueueInput): { request: Request; duplicate: boolean; dedupedBy: "key" | "content" | null } {
     const now = clock();
     const hash = sha(input.source, input.text, input.ref);
@@ -252,6 +328,7 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
               .prepare("SELECT * FROM requests WHERE project_id = ? AND idem_key IS NULL AND content_hash = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1")
               .get(input.projectId, hash, now - CONTENT_DEDUPE_MS)
       ) as Row | null | undefined;
+      touchConsumer(input.projectId, input.source);
       if (existing) return { request: toRequest(existing), duplicate: true, dedupedBy: input.key ? ("key" as const) : ("content" as const) };
       const id = newId("req");
       db()
@@ -405,11 +482,18 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
   function prune(retentionMs = RETENTION_MS): { requests: number; replies: number } {
     const cutoff = clock() - retentionMs;
     return db().transaction(() => {
-      const replies = Number(db().prepare("DELETE FROM replies WHERE acked_at IS NOT NULL AND acked_at < ?").run(cutoff).changes);
+      const replies = Number(
+        db()
+          .prepare(
+            `DELETE FROM replies AS r WHERE r.created_at < ? AND NOT ${WAITING} AND NOT EXISTS (SELECT 1 FROM reply_acks a WHERE a.reply_id = r.id AND a.acked_at >= ?)`,
+          )
+          .run(cutoff, cutoff).changes,
+      );
+      db().prepare("DELETE FROM reply_acks WHERE reply_id NOT IN (SELECT id FROM replies)").run();
       const requests = Number(
         db()
           .prepare(
-            "DELETE FROM requests WHERE created_at < ? AND (state IN ('abandoned', 'failed') OR (state = 'delivered' AND confirmed_at IS NOT NULL)) AND id NOT IN (SELECT in_reply_to FROM replies WHERE in_reply_to IS NOT NULL AND acked_at IS NULL)",
+            "DELETE FROM requests WHERE created_at < ? AND (state IN ('abandoned', 'failed') OR (state = 'delivered' AND confirmed_at IS NOT NULL)) AND id NOT IN (SELECT in_reply_to FROM replies WHERE in_reply_to IS NOT NULL)",
           )
           .run(cutoff).changes,
       );
@@ -444,8 +528,12 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     );
   }
 
-  function listRequests(projectId: string, limit = 30): Request[] {
-    const rows = db().prepare("SELECT * FROM requests WHERE project_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(projectId, limit) as Row[];
+  function listRequests(projectId: string, limit = 30, source: string | null = null): Request[] {
+    const rows = (
+      source
+        ? db().prepare("SELECT * FROM requests WHERE project_id = ? AND source = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(projectId, source, limit)
+        : db().prepare("SELECT * FROM requests WHERE project_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(projectId, limit)
+    ) as Row[];
     return rows.map(toRequest);
   }
 
@@ -465,47 +553,86 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     return db().transaction(() => {
       const existing = db().prepare("SELECT * FROM replies WHERE project_id = ? AND idem_key = ?").get(input.projectId, key) as Row | null | undefined;
       if (existing) return { reply: toReply(existing), duplicate: true };
+      const audience = input.audience ?? (input.inReplyTo ? (getRequest(input.inReplyTo)?.source ?? null) : null);
       const id = newId("rep");
       db()
         .prepare(
-          "INSERT INTO replies (id, project_id, prefix, lead_thread_id, in_reply_to, kind, author, text, idem_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO replies (id, project_id, prefix, lead_thread_id, in_reply_to, audience, kind, author, text, idem_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(id, input.projectId, input.prefix, input.leadThreadId, input.inReplyTo, input.kind, input.author, input.text, key, clock());
+        .run(id, input.projectId, input.prefix, input.leadThreadId, input.inReplyTo, audience, input.kind, input.author, input.text, key, clock());
       db().prepare("UPDATE wake SET wanted = wanted + 1, next_attempt_at = MIN(next_attempt_at, ?) WHERE id = 1").run(clock());
       return { reply: getReply(id)!, duplicate: false };
     })();
   }
 
-  function listReplies(opts: { projectId?: string | null; includeAcked?: boolean; limit?: number; afterSeq?: number; newestFirst?: boolean }): Reply[] {
-    const where = ["seq > ?"];
+  function listReplies(opts: { projectId?: string | null; consumer?: string | null; includeAcked?: boolean; limit?: number; afterSeq?: number; newestFirst?: boolean }): Reply[] {
+    const limit = Math.max(1, Math.min(opts.limit ?? 50, 200));
+    const order = opts.newestFirst ? "DESC" : "ASC";
+    if (opts.consumer) {
+      const where = ["r.seq > ?", "c.name = ?", RECIPIENT];
+      const params: unknown[] = [opts.afterSeq ?? 0, opts.consumer];
+      if (!opts.includeAcked) where.push(`NOT ${ACKED_BY_C}`);
+      if (opts.projectId) {
+        where.push("r.project_id = ?");
+        params.push(opts.projectId);
+      }
+      const rows = db()
+        .prepare(
+          `SELECT r.*, (SELECT a.acked_at FROM reply_acks a WHERE a.reply_id = r.id AND a.consumer = c.name) AS my_acked_at FROM replies r JOIN consumers c ON c.project_id = r.project_id WHERE ${where.join(" AND ")} ORDER BY r.seq ${order} LIMIT ?`,
+        )
+        .all(...params, limit) as Row[];
+      return rows.map(toReply);
+    }
+    const where = ["r.seq > ?"];
     const params: unknown[] = [opts.afterSeq ?? 0];
-    if (!opts.includeAcked) where.push("acked_at IS NULL");
+    if (!opts.includeAcked) where.push(WAITING);
     if (opts.projectId) {
-      where.push("project_id = ?");
+      where.push("r.project_id = ?");
       params.push(opts.projectId);
     }
-    params.push(Math.max(1, Math.min(opts.limit ?? 50, 200)));
-    const rows = db().prepare(`SELECT * FROM replies WHERE ${where.join(" AND ")} ORDER BY seq ${opts.newestFirst ? "DESC" : "ASC"} LIMIT ?`).all(...params) as Row[];
+    const rows = db()
+      .prepare(
+        `SELECT r.*, CASE WHEN ${WAITING} THEN NULL ELSE (SELECT MAX(a.acked_at) FROM reply_acks a WHERE a.reply_id = r.id) END AS all_acked_at FROM replies r WHERE ${where.join(" AND ")} ORDER BY r.seq ${order} LIMIT ?`,
+      )
+      .all(...params, limit) as Row[];
     return rows.map(toReply);
   }
 
-  function pendingCounts(): Record<string, number> {
-    const rows = db().prepare("SELECT prefix, COUNT(*) AS n FROM replies WHERE acked_at IS NULL GROUP BY prefix").all() as Row[];
-    return Object.fromEntries(rows.map((row) => [String(row.prefix), num(row.n)]));
+  function pendingByConsumer(): Record<string, Record<string, number>> {
+    const rows = db()
+      .prepare(`SELECT c.name AS consumer, r.prefix AS prefix, COUNT(*) AS n FROM replies r JOIN consumers c ON c.project_id = r.project_id WHERE ${RECIPIENT} AND NOT ${ACKED_BY_C} GROUP BY c.name, r.prefix ORDER BY c.name, r.prefix`)
+      .all() as Row[];
+    const out: Record<string, Record<string, number>> = {};
+    for (const row of rows) (out[String(row.consumer)] ??= {})[String(row.prefix)] = num(row.n);
+    return out;
   }
 
-  function ack(projectId: string, ids: string[]): { acked: string[]; alreadyAcked: string[]; unknown: string[]; otherProject: string[] } {
-    const out = { acked: [] as string[], alreadyAcked: [] as string[], unknown: [] as string[], otherProject: [] as string[] };
+  function pendingCounts(consumer?: string | null): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [name, byPrefix] of Object.entries(pendingByConsumer())) {
+      if (consumer && name !== consumer) continue;
+      for (const [prefix, n] of Object.entries(byPrefix)) out[prefix] = (out[prefix] ?? 0) + n;
+    }
+    return out;
+  }
+
+  function ack(projectId: string, consumer: string, ids: string[]): AckResult {
+    const out: AckResult = { acked: [], alreadyAcked: [], unknown: [], otherProject: [], notYours: [] };
     db().transaction(() => {
+      touchConsumer(projectId, consumer);
       const now = clock();
       for (const id of [...new Set(ids)]) {
         const row = getReply(id);
         if (!row) out.unknown.push(id);
         else if (row.projectId !== projectId) out.otherProject.push(id);
-        else if (row.ackedAt !== null) out.alreadyAcked.push(id);
         else {
-          db().prepare("UPDATE replies SET acked_at = ? WHERE id = ? AND acked_at IS NULL").run(now, id);
-          out.acked.push(id);
+          const mine = recipients(id).find((recipient) => recipient.consumer === consumer);
+          if (!mine) out.notYours.push(id);
+          else if (mine.ackedAt !== null) out.alreadyAcked.push(id);
+          else {
+            db().prepare("INSERT OR IGNORE INTO reply_acks (reply_id, consumer, acked_at) VALUES (?, ?, ?)").run(id, consumer, now);
+            out.acked.push(id);
+          }
         }
       }
     })();
@@ -590,7 +717,13 @@ export function createMailbox(db: () => SqlDb, clock: () => number = Date.now) {
     addReply,
     listReplies,
     pendingCounts,
+    pendingByConsumer,
     ack,
+    touchConsumer,
+    consumers,
+    hasConsumer,
+    forgetConsumer,
+    recipients,
     wake,
     claimWake,
     wakeSent,

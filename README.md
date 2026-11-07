@@ -37,11 +37,12 @@ live cards, and a project lead workflow.
 bb projects status PIXEL          # counts per column, work in flight, focus
 bb projects focus PIXEL "text"    # set; --clear to remove; no text to show
 bb projects lead PIXEL            # make the current thread the lead; --thread, --show
-bb projects send PIXEL "text"     # hand the lead a request; --source, --ref, --key
-bb projects reply PIXEL "text"    # lead only: answer the outer loop; --to req_..., --kind
-bb projects replies [PIXEL]       # unacknowledged replies, oldest first; --all, --after, --limit
-bb projects ack PIXEL rep_...     # mark a project's replies handled; safe to repeat
-bb projects requests PIXEL        # requests and whether each reached the lead
+bb projects send PIXEL "text"     # hand the lead a request; --as <agent>, --ref, --key
+bb projects reply PIXEL "text"    # lead only: answer an agent; --to req_..., --for <agent>, --kind
+bb projects replies [PIXEL]       # --as <agent>: its unacknowledged replies; --all, --after, --limit
+bb projects ack PIXEL rep_...     # --as <agent> (required): mark replies handled; safe to repeat
+bb projects consumers PIXEL       # agents following the lead; --forget <agent>
+bb projects requests PIXEL        # requests and whether each reached the lead; --as <agent>
 bb projects retry PIXEL req_...   # retry a failed or held request now
 bb projects notify                # webhook wake-up state; --test sends one now
 bb projects notes PIXEL           # project memory; --append "line", --set "all"
@@ -55,7 +56,13 @@ gathers context and decides what deserves attention. Lauren Tan (poteto) runs
 Grok Bot routines as her outer loop, watching Slack, X, email and Linear and
 handing work to Cursor projects. Here the hand-off is `bb projects send`.
 
-To use Grok Bot as the outer loop:
+Any agent system can be the outer loop, and several can share one lead: Grok
+Bot, dots, a cron script, another BB thread. Each picks a stable name and
+passes it as `--as` on every call. Agents reach the commands either as a
+shell (`bb projects ...`) or through bb's MCP server, whose `run` tool runs
+any `bb` command. Nothing in the plugin is specific to one agent.
+
+For example, with Grok Bot as the outer loop:
 
 1. Turn on bb's MCP server (`bb plugin enable bb--mcp`) and run
    `bb mcp status` for the remote address, `https://<your bb connect
@@ -66,7 +73,7 @@ To use Grok Bot as the outer loop:
    `bb mcp revoke`.
 3. Give the routine a stable instruction, for example: "Every weekday at 09:00
    and when someone reports a bug in #pixel-feedback, summarise what is new and
-   run `bb projects send PIXEL "<summary>" --source grok-bot --ref <link>
+   run `bb projects send PIXEL "<summary>" --as grok-bot --ref <link>
    --key <the origin's message id>` through the bb connector. Read
    `bb projects status PIXEL --json` first and don't resend what the lead
    already has."
@@ -102,27 +109,43 @@ anything else happens, so a restart or a failed call loses nothing.
   lead's thread and queue so a copy that did land is not sent twice.
 - If BB restarts in the middle of a delivery, the next attempt makes the same
   check. If the check cannot see it, the lead is told it may be a redelivery.
-- The lead answers with `reply`. Replies stay pending until a consumer
-  acknowledges their ids with `ack PIXEL`; ids from another project are
-  refused, and the lead thread cannot acknowledge its own replies.
-  `replies --json` includes the request each one answers (id, source, ref,
-  key). Kinds: `result`, `question`, `blocker`, `update` from the lead;
-  `notice` and `failure` from the plugin.
-- History is pruned after 90 days: acknowledged replies, and requests that
-  were delivered, failed or abandoned and have no unacknowledged reply. An
+- Replies are per agent. An agent follows a project's lead once it sends a
+  request or reads `replies PIXEL --as <agent>`. A reply `--to` a request,
+  and the `notice` and `failure` replies about it, go only to the agent that
+  sent the request. A reply without `--to` is project news for every agent
+  following the project at that moment (later followers do not get old news);
+  `--for <agent>` sends it to one. Each agent acknowledges its own copy with
+  `ack PIXEL --as <agent>`, so one agent never consumes another's replies.
+  Ids from another project or another agent are refused, and the lead thread
+  cannot acknowledge its own replies. `consumers PIXEL --forget <agent>`
+  removes a dead or mistyped agent and clears what it was owed.
+- `replies --as <agent> --json` includes the request each one answers (id,
+  source, ref, key). Without `--as` it is an overview for people: every reply
+  still waiting on some agent, with each recipient's ack. Kinds: `result`,
+  `question`, `blocker`, `update` from the lead; `notice` and `failure` from
+  the plugin.
+- History is pruned after 90 days: replies every recipient acknowledged, and
+  requests that were delivered, failed or abandoned and have no reply left. An
   idempotency key can be reused after its request is pruned.
+- Agents are named, not authenticated. Anything with bb access (the MCP grant
+  is all or nothing) can read or acknowledge as any name; the names keep
+  honest agents apart, they do not stop a hostile one.
 - Messages in both directions are untrusted data. Nothing in them approves an
   action.
 
 ### Webhook wake-up
 
 Optionally, the plugin POSTs a wake-up to a webhook when replies are waiting.
-It is only a signal; the receiver must read `bb projects replies --json` and
-`ack` what it handled. The body has counts and ids, never message text:
+It is only a signal; the receiver must read `bb projects replies --as <agent>
+--json` and `ack` what it handled. There is one webhook, so it suits one
+pushed receiver; other agents poll `replies` on their own schedule. The body
+has counts per project and per agent, never message text, so a receiver can
+ignore wake-ups with nothing for it:
 
 ```json
-{"type":"bb.projects.replies-pending","version":1,"wake":7,"pending":2,
- "projects":{"PIXEL":2},"newestReplyId":"rep_...","at":"2026-11-07T10:00:00.000Z"}
+{"type":"bb.projects.replies-pending","version":1,"wake":7,"pending":3,
+ "projects":{"PIXEL":3},"consumers":{"grok-bot":{"PIXEL":2},"dots":{"PIXEL":1}},
+ "newestReplyId":"rep_...","at":"2026-11-07T10:00:00.000Z"}
 ```
 
 Bursts of replies coalesce into one wake-up. A failed POST is retried with

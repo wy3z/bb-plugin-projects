@@ -52,7 +52,7 @@ describe("Grok Bot to project PM and back", () => {
     expect(again).toMatchObject({ id: answer.id, duplicate: true });
     const blocker = (await fake.run(["reply", "PIXEL", "CI", "is", "red", "on", "main", "--kind", "blocker", "--json"], "thr_lead1")).json();
 
-    const pending = (await fake.run(["replies", "--json"])).json();
+    const pending = (await fake.run(["replies", "--as", "grok-bot", "--json"])).json();
     expect(pending.pending).toBe(2);
     expect(pending.replies.map((reply: { id: string }) => reply.id)).toEqual([answer.id, blocker.id]);
     expect(pending.replies[0]).toMatchObject({
@@ -61,15 +61,18 @@ describe("Grok Bot to project PM and back", () => {
       request: { id: first.id, source: "grok-bot", ref: "https://slack.test/p1", key: "slack:C1:1.0001" },
       text: "Fixed in PR #12; needs James to merge",
     });
-    expect((await fake.run(["replies", "--after", answer.id, "--json"])).json().replies.map((reply: { id: string }) => reply.id)).toEqual([blocker.id]);
+    expect((await fake.run(["replies", "--as", "grok-bot", "--after", answer.id, "--json"])).json().replies.map((reply: { id: string }) => reply.id)).toEqual([blocker.id]);
 
-    const acked = await fake.run(["ack", "PIXEL", answer.id, "--json"]);
+    const unnamed = await fake.run(["ack", "PIXEL", answer.id]);
+    expect(unnamed.exitCode).not.toBe(0);
+    expect(unnamed.stderr ?? unnamed.stdout).toContain("--as");
+    const acked = await fake.run(["ack", "PIXEL", answer.id, "--as", "grok-bot", "--json"]);
     expect(acked.exitCode).toBe(0);
-    expect(acked.json()).toEqual({ acked: [answer.id], alreadyAcked: [], unknown: [], otherProject: [] });
-    expect((await fake.run(["ack", "PIXEL", answer.id, "--json"])).json().alreadyAcked).toEqual([answer.id]);
-    expect((await fake.run(["ack", "PIXEL", "rep_unknown"])).exitCode).toBe(1);
-    expect((await fake.run(["replies", "PIXEL", "--json"])).json().replies.map((reply: { id: string }) => reply.id)).toEqual([blocker.id]);
-    expect((await fake.run(["replies", "OTHER", "--json"])).json()).toEqual({ pending: 0, replies: [] });
+    expect(acked.json()).toEqual({ as: "grok-bot", acked: [answer.id], alreadyAcked: [], unknown: [], otherProject: [], notYours: [] });
+    expect((await fake.run(["ack", "PIXEL", answer.id, "--as", "grok-bot", "--json"])).json().alreadyAcked).toEqual([answer.id]);
+    expect((await fake.run(["ack", "PIXEL", "rep_unknown", "--as", "grok-bot"])).exitCode).toBe(1);
+    expect((await fake.run(["replies", "PIXEL", "--as", "grok-bot", "--json"])).json().replies.map((reply: { id: string }) => reply.id)).toEqual([blocker.id]);
+    expect((await fake.run(["replies", "OTHER", "--as", "grok-bot", "--json"])).json()).toEqual({ as: "grok-bot", pending: 0, replies: [] });
   });
 
   it("ack is scoped to the project and refused from the lead thread", async () => {
@@ -78,15 +81,17 @@ describe("Grok Bot to project PM and back", () => {
     fake.addThread("thr_other");
     await fake.run(["lead", "PIXEL"], "thr_lead1");
     await fake.run(["lead", "OTHER"], "thr_other");
+    await fake.run(["replies", "PIXEL", "--as", "grok-bot"]);
+    await fake.run(["replies", "OTHER", "--as", "grok-bot"]);
     const mine = (await fake.run(["reply", "PIXEL", "pixel news", "--json"], "thr_lead1")).json();
     const theirs = (await fake.run(["reply", "OTHER", "other news", "--json"], "thr_other")).json();
-    const byLead = await fake.run(["ack", "PIXEL", mine.id], "thr_lead1");
+    const byLead = await fake.run(["ack", "PIXEL", mine.id, "--as", "grok-bot"], "thr_lead1");
     expect(byLead.exitCode).not.toBe(0);
     expect(byLead.stderr ?? byLead.stdout).toContain("cannot acknowledge its own replies");
-    const crossed = await fake.run(["ack", "PIXEL", mine.id, theirs.id, "--json"]);
+    const crossed = await fake.run(["ack", "PIXEL", mine.id, theirs.id, "--as", "grok-bot", "--json"]);
     expect(crossed.exitCode).toBe(1);
-    expect(crossed.json()).toEqual({ acked: [mine.id], alreadyAcked: [], unknown: [], otherProject: [theirs.id] });
-    expect((await fake.run(["replies", "OTHER", "--json"])).json().pending).toBe(1);
+    expect(crossed.json()).toEqual({ as: "grok-bot", acked: [mine.id], alreadyAcked: [], unknown: [], otherProject: [theirs.id], notYours: [] });
+    expect((await fake.run(["replies", "OTHER", "--as", "grok-bot", "--json"])).json().pending).toBe(1);
   });
 
   it("send reports a content dedupe, and retry redelivers a failed request through the CLI", async () => {
@@ -245,5 +250,79 @@ describe("outer loop reliability", () => {
       { threadId: "thr_a", urls: ["https://github.com/o/r/pull/1"] },
       { threadId: "thr_b", urls: ["https://github.com/o/r/pull/1"] },
     ]);
+  });
+});
+
+describe("any agent system", () => {
+  const ids = (out: { json(): { replies: { id: string }[] } }) => out.json().replies.map((reply) => reply.id);
+
+  it("routes each answer to the agent that asked, shares project news, and keeps acks per agent", async () => {
+    const fake = boot();
+    fake.addThread("thr_lead1");
+    await fake.run(["lead", "PIXEL"], "thr_lead1");
+    const fromGrok = (await fake.run(["send", "PIXEL", "Samsung", "login", "500s", "--as", "grok-bot", "--json"])).json();
+    const fromDots = (await fake.run(["send", "PIXEL", "Renew", "the", "TLS", "cert", "--as", "dots", "--json"])).json();
+    expect([fromGrok.source, fromDots.source]).toEqual(["grok-bot", "dots"]);
+    expect(fake.sent[1]!.text).toContain("it goes only to dots");
+
+    const toGrok = (await fake.run(["reply", "PIXEL", "login", "fixed", "--to", fromGrok.id, "--json"], "thr_lead1")).json();
+    const toDots = (await fake.run(["reply", "PIXEL", "cert", "renewed", "--to", fromDots.id, "--json"], "thr_lead1")).json();
+    const news = (await fake.run(["reply", "PIXEL", "release", "cut", "--json"], "thr_lead1")).json();
+    const dotsOnly = (await fake.run(["reply", "PIXEL", "rotate", "your", "key", "--for", "dots", "--json"], "thr_lead1")).json();
+    expect([toGrok.audience, toDots.audience, news.audience, dotsOnly.audience]).toEqual(["grok-bot", "dots", null, "dots"]);
+
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "grok-bot", "--json"]))).toEqual([toGrok.id, news.id]);
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "dots", "--json"]))).toEqual([toDots.id, news.id, dotsOnly.id]);
+
+    const stolen = await fake.run(["ack", "PIXEL", toGrok.id, "--as", "dots", "--json"]);
+    expect(stolen.exitCode).toBe(1);
+    expect(stolen.json().notYours).toEqual([toGrok.id]);
+    expect((await fake.run(["ack", "PIXEL", news.id, toGrok.id, "--as", "grok-bot", "--json"])).json().acked).toEqual([news.id, toGrok.id]);
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "grok-bot", "--json"]))).toEqual([]);
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "dots", "--json"]))).toEqual([toDots.id, news.id, dotsOnly.id]);
+
+    const overview = (await fake.run(["replies", "PIXEL", "--json"])).json();
+    expect(overview.replies.map((reply: { id: string }) => reply.id)).toEqual([toDots.id, news.id, dotsOnly.id]);
+    expect(overview.replies[1].recipients).toEqual([
+      { consumer: "grok-bot", ackedAt: expect.any(String) },
+      { consumer: "dots", ackedAt: null },
+    ]);
+    expect((await fake.run(["requests", "PIXEL", "--as", "dots", "--json"])).json().requests.map((request: { id: string }) => request.id)).toEqual([fromDots.id]);
+  });
+
+  it("an agent that only reads follows from then on, and a mistyped name can be forgotten", async () => {
+    const fake = boot();
+    fake.addThread("thr_lead1");
+    await fake.run(["lead", "PIXEL"], "thr_lead1");
+    await fake.run(["send", "PIXEL", "hello", "--as", "grok-bot"]);
+    const before = (await fake.run(["reply", "PIXEL", "old", "news", "--json"], "thr_lead1")).json();
+    setSystemTime(new Date(Date.now() + 1_000));
+    const nobody = await fake.run(["reply", "PIXEL", "psst", "--for", "dots"], "thr_lead1");
+    expect(nobody.exitCode).not.toBe(0);
+    expect(nobody.stderr ?? nobody.stdout).toContain("No agent called dots");
+
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "dots", "--json"]))).toEqual([]);
+    setSystemTime(new Date(Date.now() + 1_000));
+    const after = (await fake.run(["reply", "PIXEL", "new", "news", "--json"], "thr_lead1")).json();
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "dots", "--json"]))).toEqual([after.id]);
+    expect(ids(await fake.run(["replies", "PIXEL", "--as", "grok-bot", "--json"]))).toEqual([before.id, after.id]);
+
+    setSystemTime(new Date(Date.now() + 1_000));
+    await fake.run(["replies", "PIXEL", "--as", "grokbot"]);
+    const listed = (await fake.run(["consumers", "PIXEL", "--json"])).json();
+    expect(listed.consumers.map((consumer: { name: string; repliesPending: number }) => [consumer.name, consumer.repliesPending])).toEqual([
+      ["grok-bot", 2],
+      ["dots", 1],
+      ["grokbot", 0],
+    ]);
+    expect((await fake.run(["consumers", "PIXEL", "--forget", "grokbot"], "thr_lead1")).exitCode).not.toBe(0);
+    const forgot = (await fake.run(["consumers", "PIXEL", "--forget", "dots", "--json"])).json();
+    expect(forgot).toMatchObject({ forgot: "dots", cleared: 1 });
+    expect(forgot.consumers.map((consumer: { name: string }) => consumer.name)).toEqual(["grok-bot", "grokbot"]);
+    expect((await fake.run(["consumers", "PIXEL", "--forget", "dots"])).exitCode).not.toBe(0);
+    expect((await fake.run(["send", "PIXEL", "x", "--as", "bad name!"])).exitCode).not.toBe(0);
+    expect((await fake.run(["send", "PIXEL", "x", "--as", "dots", "--source", "grok-bot"])).exitCode).not.toBe(0);
+    const unknownTo = await fake.run(["reply", "PIXEL", "x", "--to", (await fake.run(["requests", "PIXEL", "--json"])).json().requests[0].id, "--for", "dots"], "thr_lead1");
+    expect(unknownTo.stderr ?? unknownTo.stdout).toContain("Drop --for");
   });
 });

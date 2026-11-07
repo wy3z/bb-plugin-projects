@@ -11,6 +11,7 @@ export type WakeBody = {
   wake: number;
   pending: number;
   projects: Record<string, number>;
+  consumers: Record<string, Record<string, number>>;
   newestReplyId: string | null;
   at: string;
 };

@@ -1,7 +1,7 @@
 import { cliCommand, PluginCliError, type BbPluginApi } from "@get-bb/plugin-sdk";
 import type { InboxItem, ProjectMeta } from "./meta";
 import type { Project } from "./contracts";
-import { cleanKey, createMailbox, MIGRATIONS, REPLY_KINDS, REPLY_TEXT_MAX, REQUEST_TEXT_MAX, type Reply, type Request, type SqlDb } from "./mailbox";
+import { cleanConsumer, cleanKey, createMailbox, MIGRATIONS, REPLY_KINDS, REPLY_TEXT_MAX, REQUEST_TEXT_MAX, type AckResult, type Reply, type Request, type SqlDb } from "./mailbox";
 import { cleanRef, cleanSource, createCourier, type LeadState } from "./courier";
 import { httpTransport } from "./transport";
 import { sight } from "./probe";
@@ -143,7 +143,7 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
     };
   }
 
-  function replyView(reply: Reply) {
+  function replyView(reply: Reply, consumer: string | null = null) {
     const request = reply.inReplyTo ? mailbox.getRequest(reply.inReplyTo) : null;
     return {
       id: reply.id,
@@ -151,12 +151,26 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       leadThreadId: reply.leadThreadId,
       inReplyTo: reply.inReplyTo,
       request: request ? { id: request.id, source: request.source, ref: request.ref, key: request.key, createdAt: iso(request.createdAt) } : null,
+      audience: reply.audience,
       kind: reply.kind,
       author: reply.author,
       text: reply.text,
       createdAt: iso(reply.createdAt),
       ackedAt: iso(reply.ackedAt),
+      ...(consumer ? {} : { recipients: mailbox.recipients(reply.id).map((recipient) => ({ consumer: recipient.consumer, ackedAt: iso(recipient.ackedAt) })) }),
     };
+  }
+
+  function consumerOption(raw: string | undefined, required: true): string;
+  function consumerOption(raw: string | undefined, required: false): string | null;
+  function consumerOption(raw: string | undefined, required: boolean): string | null {
+    if (raw === undefined || raw.trim() === "") {
+      if (required) throw new PluginCliError("Say which agent system you are with --as, such as --as grok-bot. Use the same name you send requests with.");
+      return null;
+    }
+    const name = cleanConsumer(raw);
+    if (name !== raw.trim()) throw new PluginCliError("Agent names are 1-40 letters, digits, dots, dashes, underscores or @.");
+    return name;
   }
 
   function sendLine(request: Request, duplicate: boolean, prefix: string): string {
@@ -174,13 +188,14 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
 
   const commands = {
     send: cliCommand({
-      summary: "Hand the project lead a request from an outer loop (Grok Bot, a routine, a person); saved first, delivered when the lead can take it",
+      summary: "Hand the project lead a request from an agent system (Grok Bot, dots, a routine, a person); saved first, delivered when the lead can take it",
       positionals: [
         { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
         { name: "message", description: "What happened and what you want; the lead triages it onto the board", variadic: true, required: true },
       ],
       options: {
-        source: { type: "string", description: "Who is sending, shown to the lead (default: outer-loop)" },
+        as: { type: "string", description: "Your agent system's name, such as grok-bot or dots; the lead's answer goes only to you (default: outer-loop)" },
+        source: { type: "string", description: "Older name for --as" },
         ref: { type: "string", description: "Link to the origin: a Slack message, issue, PR or post" },
         key: { type: "string", description: "Idempotency key; resending the same key returns the first request instead of a new one" },
         json,
@@ -196,10 +211,13 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         } catch (cause) {
           throw new PluginCliError(cause instanceof Error ? cause.message : String(cause));
         }
+        const as = consumerOption(input.options.as, false);
+        const legacy = consumerOption(input.options.source, false);
+        if (as && legacy && as !== legacy) throw new PluginCliError("--as and --source name different senders; use --as only.");
         const { request, duplicate, dedupedBy } = mailbox.enqueue({
           projectId: project.id,
           prefix: project.prefix,
-          source: cleanSource(input.options.source),
+          source: cleanSource(as ?? legacy),
           text,
           ref: cleanRef(input.options.ref),
           key,
@@ -215,13 +233,14 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       },
     }),
     reply: cliCommand({
-      summary: "Project lead only: send the outer loop a result, question or blocker, saved until it is acknowledged",
+      summary: "Project lead only: answer the agent that sent a request, or tell every agent following the project; saved until each acknowledges it",
       positionals: [
         { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
         { name: "message", description: "What the sender needs to know; no secrets, no worker chatter", variadic: true, required: true },
       ],
       options: {
-        to: { type: "string", description: "The request id this answers (req_...); omit for news the sender did not ask for" },
+        to: { type: "string", description: "The request id this answers (req_...); the reply goes only to the agent that sent it" },
+        for: { type: "string", description: "Without --to: send news to one agent system (see bb projects consumers); otherwise every agent following the project gets it" },
         kind: { type: "enum", values: REPLY_KINDS, description: "result, question, blocker or update (default: result with --to, otherwise update)" },
         key: { type: "string", description: "Idempotency key; by default an identical reply to the same request is not saved twice" },
         json,
@@ -237,9 +256,13 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         if (!text) throw new PluginCliError("Say what the sender needs to know.");
         if (text.length > REPLY_TEXT_MAX) throw new PluginCliError(`Replies are limited to ${REPLY_TEXT_MAX} characters.`);
         const to = input.options.to?.trim() || null;
+        const audience = consumerOption(input.options.for, false);
         if (to) {
           const request = mailbox.getRequest(to);
           if (!request || request.projectId !== project.id) throw new PluginCliError(`No ${project.prefix} request ${to}. See bb projects requests ${project.prefix}.`);
+          if (audience && audience !== request.source) throw new PluginCliError(`Request ${to} came from ${request.source}; a reply to it goes to ${request.source}. Drop --for.`);
+        } else if (audience && !mailbox.hasConsumer(project.id, audience)) {
+          throw new PluginCliError(`No agent called ${audience} follows ${project.prefix}. See bb projects consumers ${project.prefix}.`);
         }
         let key: string | null;
         try {
@@ -252,6 +275,7 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
           prefix: project.prefix,
           leadThreadId: meta.leadThreadId,
           inReplyTo: to,
+          audience: to ? null : audience,
           kind: input.options.kind ?? (to ? "result" : "update"),
           author: meta.leadThreadId,
           text,
@@ -260,14 +284,15 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
         poke.wake?.();
         return {
           exitCode: 0,
-          stdout: input.options.json ? JSON.stringify({ ...replyView(reply), duplicate }) + "\n" : `${duplicate ? "Already saved" : "Saved"} reply ${reply.id}${to ? ` to ${to}` : ""}.\n`,
+          stdout: input.options.json ? JSON.stringify({ ...replyView(reply), duplicate }) + "\n" : `${duplicate ? "Already saved" : "Saved"} reply ${reply.id}${to ? ` to ${to}` : ""} for ${reply.audience ?? "every agent following " + project.prefix}.\n`,
         };
       },
     }),
     replies: cliCommand({
-      summary: "Read the project leads' replies to the outer loop, oldest first; unacknowledged only unless --all",
-      positionals: [{ name: "project", description: "Tracker project prefix; omit for every project" }],
+      summary: "Read the lead's replies meant for your agent system, oldest first; unacknowledged only unless --all. Without --as, an overview of every agent's replies",
+      positionals: [{ name: "project", description: "Tracker project prefix; omit for every project you follow" }],
       options: {
+        as: { type: "string", description: "Your agent system's name, such as grok-bot or dots; naming a project also follows it, so its news reaches you from now on" },
         all: { type: "boolean", description: "Include replies already acknowledged" },
         after: { type: "string", description: "Only replies after this reply id" },
         limit: { type: "integer", min: 1, max: 200, description: "At most this many (default 50)" },
@@ -275,38 +300,73 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       },
       async run(input) {
         const project = input.positionals.project ? await deps.resolveProject(input.positionals.project) : null;
+        const consumer = consumerOption(input.options.as, false);
+        if (project && consumer) mailbox.touchConsumer(project.id, consumer);
         const after = input.options.after ? mailbox.getReply(input.options.after.trim()) : null;
         if (input.options.after && !after) throw new PluginCliError(`No reply ${input.options.after}.`);
-        const replies = mailbox.listReplies({ projectId: project?.id ?? null, includeAcked: input.options.all, limit: input.options.limit ?? 50, afterSeq: after?.seq ?? 0 });
-        const counts = mailbox.pendingCounts();
+        const replies = mailbox.listReplies({ projectId: project?.id ?? null, consumer, includeAcked: input.options.all, limit: input.options.limit ?? 50, afterSeq: after?.seq ?? 0 });
+        const counts = mailbox.pendingCounts(consumer);
         const pending = project ? (counts[project.prefix] ?? 0) : Object.values(counts).reduce((total, count) => total + count, 0);
-        if (input.options.json) return { exitCode: 0, stdout: JSON.stringify({ pending, replies: replies.map(replyView) }) + "\n" };
-        const lines = replies.map((reply) => `${reply.id} [${reply.kind}] ${reply.prefix}${reply.inReplyTo ? ` re ${reply.inReplyTo}` : ""}${reply.ackedAt ? " (acked)" : ""}\n  ${reply.text.replace(/\n/g, "\n  ")}`);
+        if (input.options.json) return { exitCode: 0, stdout: JSON.stringify({ as: consumer, pending, replies: replies.map((reply) => replyView(reply, consumer)) }) + "\n" };
+        const lines = replies.map(
+          (reply) =>
+            `${reply.id} [${reply.kind}] ${reply.prefix}${reply.inReplyTo ? ` re ${reply.inReplyTo}` : ""}${consumer ? "" : ` for ${reply.audience ?? "everyone"}`}${reply.ackedAt ? " (acked)" : ""}\n  ${reply.text.replace(/\n/g, "\n  ")}`,
+        );
         return { exitCode: 0, stdout: (lines.length ? lines.join("\n") : "No replies waiting.") + "\n" };
       },
     }),
     ack: cliCommand({
-      summary: "Acknowledge a project's replies the outer loop has handled, by id; safe to repeat",
+      summary: "Acknowledge replies your agent system has handled, by id; safe to repeat. Other agents still see their copy",
       positionals: [
         { name: "project", description: "Tracker project prefix, such as PIXEL", required: true },
         { name: "ids", description: "Reply ids (rep_...)", variadic: true, required: true },
       ],
-      options: { json },
+      options: { as: { type: "string", description: "Your agent system's name (required), the same one you read replies with" }, json },
       async run(input, ctx) {
         const project = await deps.resolveProject(input.positionals.project);
         const meta = await deps.readMeta(project.id);
-        if (ctx.threadId && ctx.threadId === meta.leadThreadId) throw new PluginCliError(`The ${project.prefix} lead cannot acknowledge its own replies; the outer loop does that once it has handled them.`);
+        if (ctx.threadId && ctx.threadId === meta.leadThreadId) throw new PluginCliError(`The ${project.prefix} lead cannot acknowledge its own replies; the agent that reads them does that once it has handled them.`);
+        const consumer = consumerOption(input.options.as, true);
         const ids = (input.positionals.ids ?? []).map((id) => id.trim()).filter(Boolean);
         if (!ids.length) throw new PluginCliError("Give at least one reply id.");
         if (ids.length > 200) throw new PluginCliError("Acknowledge at most 200 replies at a time.");
-        const result = mailbox.ack(project.id, ids);
-        const problems = [...result.unknown, ...result.otherProject];
+        const result: AckResult = mailbox.ack(project.id, consumer, ids);
+        const problems = [...result.unknown, ...result.otherProject, ...result.notYours];
         return {
           exitCode: problems.length ? 1 : 0,
           stdout: input.options.json
-            ? JSON.stringify(result) + "\n"
-            : `Acknowledged ${result.acked.length}${result.alreadyAcked.length ? `, ${result.alreadyAcked.length} already` : ""}${result.unknown.length ? `; unknown: ${result.unknown.join(", ")}` : ""}${result.otherProject.length ? `; not ${project.prefix} replies: ${result.otherProject.join(", ")}` : ""}.\n`,
+            ? JSON.stringify({ as: consumer, ...result }) + "\n"
+            : `Acknowledged ${result.acked.length}${result.alreadyAcked.length ? `, ${result.alreadyAcked.length} already` : ""}${result.unknown.length ? `; unknown: ${result.unknown.join(", ")}` : ""}${result.otherProject.length ? `; not ${project.prefix} replies: ${result.otherProject.join(", ")}` : ""}${result.notYours.length ? `; not for ${consumer}: ${result.notYours.join(", ")}` : ""}.\n`,
         };
+      },
+    }),
+    consumers: cliCommand({
+      summary: "List the agent systems following a project's lead (anyone that sent it a request or read its replies); --forget removes one and clears what it was owed",
+      positionals: [{ name: "project", description: "Tracker project prefix, such as PIXEL", required: true }],
+      options: { forget: { type: "string", description: "Agent name to stop following this project, such as a mistyped --as" }, json },
+      async run(input, ctx) {
+        const project = await deps.resolveProject(input.positionals.project);
+        const forget = consumerOption(input.options.forget, false);
+        let forgotten: { forgotten: boolean; acked: number } | null = null;
+        if (forget) {
+          const meta = await deps.readMeta(project.id);
+          if (ctx.threadId && ctx.threadId === meta.leadThreadId) throw new PluginCliError(`The ${project.prefix} lead cannot remove the agents it answers.`);
+          forgotten = mailbox.forgetConsumer(project.id, forget);
+          if (!forgotten.forgotten) throw new PluginCliError(`No agent called ${forget} follows ${project.prefix}.`);
+        }
+        const pending = mailbox.pendingByConsumer();
+        const list = mailbox.consumers(project.id).map((consumer) => ({
+          name: consumer.name,
+          since: iso(consumer.firstSeen),
+          lastSeen: iso(consumer.lastSeen),
+          repliesPending: pending[consumer.name]?.[project.prefix] ?? 0,
+        }));
+        if (input.options.json) return { exitCode: 0, stdout: JSON.stringify({ project: project.prefix, consumers: list, ...(forgotten ? { forgot: forget, cleared: forgotten.acked } : {}) }) + "\n" };
+        const lines = [
+          ...(forgotten ? [`Forgot ${forget}; cleared ${forgotten.acked} replies it was owed.`] : []),
+          ...(list.length ? list.map((consumer) => `${consumer.name}: ${consumer.repliesPending} waiting, last seen ${consumer.lastSeen}`) : [`No agents follow ${project.prefix} yet.`]),
+        ];
+        return { exitCode: 0, stdout: lines.join("\n") + "\n" };
       },
     }),
     retry: cliCommand({
@@ -328,12 +388,16 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
       },
     }),
     requests: cliCommand({
-      summary: "List the outer loop's requests to a project lead and whether each was delivered",
+      summary: "List the requests agent systems sent a project lead and whether each was delivered",
       positionals: [{ name: "project", description: "Tracker project prefix, such as PIXEL", required: true }],
-      options: { limit: { type: "integer", min: 1, max: 200, description: "At most this many, newest first (default 20)" }, json },
+      options: {
+        as: { type: "string", description: "Only requests this agent system sent" },
+        limit: { type: "integer", min: 1, max: 200, description: "At most this many, newest first (default 20)" },
+        json,
+      },
       async run(input) {
         const project = await deps.resolveProject(input.positionals.project);
-        const requests = mailbox.listRequests(project.id, input.options.limit ?? 20);
+        const requests = mailbox.listRequests(project.id, input.options.limit ?? 20, consumerOption(input.options.as, false));
         if (input.options.json) return { exitCode: 0, stdout: JSON.stringify({ requests: requests.map(requestView) }) + "\n" };
         const lines = requests.map((request) => `${request.id} ${request.state}${request.delivery ? `/${request.delivery}` : ""} from ${request.source}: ${request.text.split("\n")[0]!.slice(0, 80)}`);
         return { exitCode: 0, stdout: (lines.length ? lines.join("\n") : "No requests yet.") + "\n" };
@@ -356,6 +420,7 @@ export function createMessaging(bb: BbPluginApi, deps: Deps) {
           authHeader: values.wakeHeaderName || null,
           configError: courier.wakeConfigError(),
           pending: mailbox.pendingCounts(),
+          consumers: mailbox.pendingByConsumer(),
           wake: { wanted: wake.wanted, sent: wake.sent, attempts: wake.attempts, lastSentAt: iso(wake.lastSentAt), nextAttemptAt: wake.wanted > wake.sent ? iso(wake.nextAttemptAt) : null, lastError: wake.lastError },
           ...(outcome ? { test: outcome } : {}),
         };

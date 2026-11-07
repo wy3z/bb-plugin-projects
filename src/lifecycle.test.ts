@@ -256,7 +256,7 @@ describe("dedupe and retention", () => {
     const done = w.mailbox.enqueue(ask("done")).request;
     await w.courier.deliver(done.id);
     const ackedReply = w.mailbox.addReply({ ...pixel, leadThreadId: "thr_lead1", inReplyTo: done.id, kind: "result", author: "thr_lead1", text: "ok", key: null }).reply;
-    w.mailbox.ack(pixel.projectId, [ackedReply.id]);
+    w.mailbox.ack(pixel.projectId, "grok-bot", [ackedReply.id]);
     const owed = w.mailbox.enqueue(ask("owed")).request;
     await w.courier.deliver(owed.id);
     const unacked = w.mailbox.addReply({ ...pixel, leadThreadId: "thr_lead1", inReplyTo: owed.id, kind: "question", author: "thr_lead1", text: "which?", key: null }).reply;
@@ -271,6 +271,40 @@ describe("dedupe and retention", () => {
     expect(w.mailbox.getRequest(owed.id)).not.toBeNull();
     expect(w.mailbox.getReply(unacked.id)).not.toBeNull();
     expect(w.mailbox.getRequest(waiting.id)!.state).toBe("held");
+  });
+});
+
+describe("several agent systems", () => {
+  it("a failure report goes to the agent that sent the request, and wake-ups count each agent's backlog", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    w.mailbox.touchConsumer(pixel.projectId, "dots");
+    w.faults.send = 1_000;
+    const mine = w.mailbox.enqueue({ ...ask("dots asks"), source: "dots" }).request;
+    await w.courier.deliver(mine.id);
+    await failUntilTerminal(w, clock, mine.id);
+    expect(w.mailbox.listReplies({ consumer: "dots" }).map((reply) => reply.kind)).toEqual(["failure"]);
+    expect(w.mailbox.listReplies({ consumer: "grok-bot" })).toEqual([]);
+    w.mailbox.addReply({ ...pixel, leadThreadId: "thr_lead1", inReplyTo: null, kind: "update", author: "thr_lead1", text: "news", key: null });
+    w.wakes.length = 0;
+    w.mailbox.wantWake();
+    await w.courier.tick();
+    expect(w.wakes.at(-1)).toMatchObject({ pending: 3, projects: { PIXEL: 3 }, consumers: { dots: { PIXEL: 2 }, "grok-bot": { PIXEL: 1 } } });
+  });
+
+  it("keeps project news until every agent following it has acknowledged it", async () => {
+    const clock = new Clock();
+    const w = world(openDb(), clock);
+    w.mailbox.touchConsumer(pixel.projectId, "dots");
+    const news = w.mailbox.addReply({ ...pixel, leadThreadId: "thr_lead1", inReplyTo: null, kind: "update", author: "thr_lead1", text: "news", key: null }).reply;
+    w.mailbox.ack(pixel.projectId, "grok-bot", [news.id]);
+    clock.advance(RETENTION_MS + 1);
+    expect(w.mailbox.prune().replies).toBe(0);
+    w.mailbox.ack(pixel.projectId, "dots", [news.id]);
+    expect(w.mailbox.prune().replies).toBe(0);
+    clock.advance(RETENTION_MS + 1);
+    expect(w.mailbox.prune().replies).toBe(1);
+    expect(w.mailbox.recipients(news.id)).toEqual([]);
   });
 });
 
@@ -293,5 +327,31 @@ describe("upgrade from the first schema", () => {
     clock.advance(CHECK_EVERY_MS);
     await w.courier.tick();
     expect(w.mailbox.listReplies({})).toHaveLength(0);
+  });
+});
+
+describe("upgrade to per-agent replies", () => {
+  it("routes earlier replies to their sender and keeps earlier acks", async () => {
+    const { Database } = await import("bun:sqlite");
+    const { migrate } = await import("../test/harness");
+    const { MIGRATIONS, createMailbox } = await import("./mailbox");
+    const path = tempDbPath();
+    const old = new Database(path);
+    migrate(old as never, MIGRATIONS.slice(0, 2));
+    const insertRequest = old.prepare("INSERT INTO requests (id, project_id, prefix, source, text, ref, idem_key, content_hash, created_at, state, next_attempt_at) VALUES (?, 'proj_pixel', 'PIXEL', ?, 'x', NULL, NULL, ?, 1, 'delivered', 1)");
+    insertRequest.run("req_g", "grok-bot", "h1");
+    insertRequest.run("req_d", "dots", "h2");
+    const insertReply = old.prepare("INSERT INTO replies (id, project_id, prefix, lead_thread_id, in_reply_to, kind, author, text, idem_key, created_at, acked_at) VALUES (?, 'proj_pixel', 'PIXEL', 'thr_lead1', ?, 'result', 'thr_lead1', 't', ?, 2, ?)");
+    insertReply.run("rep_g", "req_g", "k1", null);
+    insertReply.run("rep_d", "req_d", "k2", 3);
+    insertReply.run("rep_news", null, "k3", 4);
+    insertReply.run("rep_open", null, "k4", null);
+    old.close();
+    const db = openDb(path);
+    const mailbox = createMailbox(() => db, new Clock().now);
+    expect(mailbox.listReplies({ consumer: "grok-bot" }).map((reply) => reply.id)).toEqual(["rep_g", "rep_open"]);
+    expect(mailbox.listReplies({ consumer: "dots" }).map((reply) => reply.id)).toEqual(["rep_open"]);
+    expect(mailbox.getReply("rep_d")!.audience).toBe("dots");
+    expect(mailbox.recipients("rep_news").map((recipient) => recipient.ackedAt)).toEqual([4, 4]);
   });
 });
