@@ -3,7 +3,8 @@ import { experimental_Icon as Icon } from "@get-bb/plugin-sdk/app";
 import type { Project, Status, Task } from "./contracts";
 import { TaskCard, type CardContext } from "./Card";
 import { byStatus, useBoardMoves, useNow, usePresets, useProjectData, useThreadIndex, type MoveTask } from "./data";
-import { FilterIcon, ProjectGlyph, STATUS_LABEL, StatusGlyph } from "./glyphs";
+import { FilterIcon, STATUS_LABEL, StatusGlyph } from "./glyphs";
+import { ProjectIconMark, useProjectIcon } from "./ProjectIcon";
 import { FocusCard, LeadLink, useProjectMeta } from "./Focus";
 import { LoopCard } from "./Loop";
 import { TaskDetail } from "./TaskDetail";
@@ -109,6 +110,7 @@ export function ProjectView({
   const [view, setView] = useState<View>(() => (compact ? "list" : readView("board")));
   const [query, setQuery] = useState("");
   const statusFilter = useStatusFilter(projectId);
+  const projectIcon = useProjectIcon(project?.linkedBbProjectId ?? null);
 
   const visible = useMemo(() => tasks.filter((task) => matches(task, query.trim())), [tasks, query]);
   const groups = useMemo(() => byStatus(visible), [visible]);
@@ -139,9 +141,7 @@ export function ProjectView({
     <div className="bbp-project" data-compact={compact || undefined}>
       <div className="bbp-toolbar">
         <div className="bbp-toolbar__title">
-          <span className="bbp-toolbar__icon" aria-hidden="true">
-            <ProjectGlyph />
-          </span>
+          <ProjectIconMark icon={projectIcon} />
           {projects.length > 1 && onProjectChange ? (
             <label className="bbp-select">
               <select value={projectId} onChange={(event) => onProjectChange(event.currentTarget.value)} aria-label="Project">
