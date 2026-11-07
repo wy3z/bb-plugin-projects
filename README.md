@@ -70,7 +70,7 @@ includes `needsYou` and the loop settings, so a routine can also report back.
 
 ## Requirements
 
-BB 0.48.1+, plugin SDK 0.6.104+, the built-in Tasks plugin enabled, and Agent
+BB 0.49+, plugin SDK 0.6.132+, the built-in Tasks plugin enabled, and Agent
 Pills for Apply locally and Create PR.
 
 ## Develop
