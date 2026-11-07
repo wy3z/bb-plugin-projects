@@ -19,7 +19,7 @@ const PROJECT_TAB = { id: "manager-project", context: { kind: "thread" }, availa
 
 function ProjectIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="3.5" y="3.5" width="17" height="17" rx="3" />
       <path d="M8.5 7.5v8" />
       <path d="M12 7.5v4" />
