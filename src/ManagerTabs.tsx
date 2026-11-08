@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import {
   experimental_Icon as Icon,
@@ -15,6 +15,17 @@ const STORE_KEY = "bb-projects:tabs";
 const HOST_ATTR = "data-bb-projects-tabs";
 const CHAT_ATTR = "data-bb-projects-chat";
 const HEADER_SELECTOR = "header:has([data-thread-header-workflow-actions])";
+const COMPACT_QUERY = "(max-width: 767px)";
+
+function subscribeCompact(listener: () => void) {
+  const query = window.matchMedia(COMPACT_QUERY);
+  query.addEventListener("change", listener);
+  return () => query.removeEventListener("change", listener);
+}
+
+function useCompactViewport(): boolean {
+  return useSyncExternalStore(subscribeCompact, () => window.matchMedia(COMPACT_QUERY).matches);
+}
 
 type TabStore = Record<string, string[]>;
 
@@ -136,6 +147,118 @@ function TabStatus({ thread }: { thread: PluginSidebarThread | undefined }) {
   return <span className="bbp-tabs__dot" data-tone="idle" aria-label="Idle" />;
 }
 
+function TabLabel({ thread, isLead }: { thread: PluginSidebarThread | undefined; isLead: boolean }) {
+  return (
+    <>
+      <TabStatus thread={thread} />
+      {isLead ? <Icon name={"bb-projects:project" as "Layers"} className="bbp-tabs__icon size-3.5" /> : null}
+      <span className="bbp-tabs__text">{thread?.displayTitle ?? "Thread"}</span>
+    </>
+  );
+}
+
+function TabDropdown({
+  tabs,
+  leadId,
+  selectedId,
+  byId,
+  onSelect,
+  onClose,
+}: {
+  tabs: readonly string[];
+  leadId: string;
+  selectedId: string | null;
+  byId: ReadonlyMap<string, PluginSidebarThread>;
+  onSelect: (id: string) => void;
+  onClose: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const currentId = selectedId && tabs.includes(selectedId) ? selectedId : leadId;
+
+  useEffect(() => {
+    if (!open) return;
+    const returnTo = trigger.current;
+    panel.current?.focus({ preventScroll: true });
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      returnTo?.focus({ preventScroll: true });
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={trigger}
+        type="button"
+        className="bbp-tabs__trigger"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Project threads, ${tabs.length} open`}
+        onClick={() => setOpen(!open)}
+      >
+        <TabLabel thread={byId.get(currentId)} isLead={currentId === leadId} />
+        <Icon name="ChevronDown" className="bbp-tabs__chevron" />
+      </button>
+      {open
+        ? createPortal(
+            <>
+              <div className="bbp-sheet__backdrop" onClick={() => setOpen(false)} />
+              <div ref={panel} className="bbp-sheet" role="dialog" aria-label="Project threads" tabIndex={-1}>
+                <div className="bbp-sheet__handle" aria-hidden>
+                  <span />
+                </div>
+                <div className="bbp-sheet__list" role="menu">
+                  {tabs.map((id) => {
+                    const thread = byId.get(id);
+                    const current = id === currentId;
+                    const isLead = id === leadId;
+                    return (
+                      <div key={id} className="bbp-sheet__row" data-current={current || undefined}>
+                        <button
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={current}
+                          className="bbp-sheet__select"
+                          onClick={() => {
+                            setOpen(false);
+                            if (!current) onSelect(id);
+                          }}
+                        >
+                          <TabLabel thread={thread} isLead={isLead} />
+                          {current ? <Icon name="Check" className="bbp-sheet__check" /> : null}
+                        </button>
+                        {isLead ? null : (
+                          <button
+                            type="button"
+                            className="bbp-sheet__close"
+                            aria-label={`Close ${thread?.displayTitle ?? "tab"}`}
+                            onClick={() => onClose(id)}
+                          >
+                            <Icon name="X" className="bbp-sheet__x" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>,
+            document.body,
+          )
+        : null}
+    </>
+  );
+}
+
 export function ManagerTabs() {
   const { threadId } = useBbContext();
   const navigate = useBbNavigate();
@@ -143,6 +266,7 @@ export function ManagerTabs() {
   const leads = experimental_useRpcQuery({ contract: projectsContract, method: "listLeads", input: {} });
   const store = tabStore.use();
   const views = viewStore.use();
+  const compact = useCompactViewport();
 
   const byId = useMemo(() => new Map(threads.map((thread) => [thread.id, thread])), [threads]);
   const leadIds = useMemo(() => new Set((leads.data?.leads ?? []).map((lead) => lead.threadId)), [leads.data]);
@@ -201,6 +325,9 @@ export function ManagerTabs() {
   return (
     <>
       {createPortal(
+        compact ? (
+          <TabDropdown tabs={tabs} leadId={leadId} selectedId={selectedId} byId={byId} onSelect={select} onClose={close} />
+        ) : (
         <div className="bbp-tabs" role="tablist" aria-label="Project threads">
           {tabs.map((id) => {
             const thread = byId.get(id);
@@ -224,9 +351,7 @@ export function ManagerTabs() {
                     }
                   }}
                 >
-                  <TabStatus thread={thread} />
-                  {isLead ? <Icon name={"bb-projects:project" as "Layers"} className="bbp-tabs__icon size-3.5" /> : null}
-                  <span className="bbp-tabs__text">{thread?.displayTitle ?? "Thread"}</span>
+                  <TabLabel thread={thread} isLead={isLead} />
                 </button>
                 {isLead ? null : (
                   <button type="button" className="bbp-tabs__close" aria-label={`Close ${thread?.displayTitle ?? "tab"}`} onClick={() => close(id)}>
@@ -236,7 +361,8 @@ export function ManagerTabs() {
               </div>
             );
           })}
-        </div>,
+        </div>
+        ),
         tabHost,
       )}
       {chatHost && overlayId ? createPortal(<ThreadChat key={overlayId} threadId={overlayId} variant="full" />, chatHost) : null}
