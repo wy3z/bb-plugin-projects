@@ -180,16 +180,43 @@ function TabDropdown({
   useEffect(() => {
     if (!open) return;
     const returnTo = trigger.current;
-    panel.current?.focus({ preventScroll: true });
+    const focusables = () => [...(panel.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+    (panel.current?.querySelector<HTMLButtonElement>('[aria-current="true"]') ?? focusables()[0] ?? panel.current)?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopPropagation();
         setOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusables();
+      const root = panel.current;
+      if (!root || items.length === 0) {
+        event.preventDefault();
+        root?.focus({ preventScroll: true });
+        return;
+      }
+      const active = document.activeElement;
+      const index = items.indexOf(active as HTMLButtonElement);
+      const inside = root.contains(active);
+      if (event.shiftKey && (!inside || index <= 0)) {
+        event.preventDefault();
+        items[items.length - 1]!.focus({ preventScroll: true });
+      } else if (!event.shiftKey && (!inside || index === items.length - 1)) {
+        event.preventDefault();
+        items[0]!.focus({ preventScroll: true });
       }
     };
-    window.addEventListener("keydown", onKey);
+    const onFocusIn = (event: FocusEvent) => {
+      const root = panel.current;
+      if (root && !root.contains(event.target as Node)) (focusables()[0] ?? root).focus({ preventScroll: true });
+    };
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("focusin", onFocusIn);
     return () => {
-      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("focusin", onFocusIn);
       returnTo?.focus({ preventScroll: true });
     };
   }, [open]);
@@ -200,7 +227,7 @@ function TabDropdown({
         ref={trigger}
         type="button"
         className="bbp-tabs__trigger"
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`Project threads, ${tabs.length} open`}
         onClick={() => setOpen(!open)}
@@ -212,21 +239,20 @@ function TabDropdown({
         ? createPortal(
             <>
               <div className="bbp-sheet__backdrop" onClick={() => setOpen(false)} />
-              <div ref={panel} className="bbp-sheet" role="dialog" aria-label="Project threads" tabIndex={-1}>
+              <div ref={panel} className="bbp-sheet" role="dialog" aria-modal="true" aria-label="Project threads" tabIndex={-1}>
                 <div className="bbp-sheet__handle" aria-hidden>
                   <span />
                 </div>
-                <div className="bbp-sheet__list" role="menu">
+                <div className="bbp-sheet__list" role="list">
                   {tabs.map((id) => {
                     const thread = byId.get(id);
                     const current = id === currentId;
                     const isLead = id === leadId;
                     return (
-                      <div key={id} className="bbp-sheet__row" data-current={current || undefined}>
+                      <div key={id} className="bbp-sheet__row" role="listitem" data-current={current || undefined}>
                         <button
                           type="button"
-                          role="menuitemradio"
-                          aria-checked={current}
+                          aria-current={current ? "true" : undefined}
                           className="bbp-sheet__select"
                           onClick={() => {
                             setOpen(false);
@@ -241,7 +267,10 @@ function TabDropdown({
                             type="button"
                             className="bbp-sheet__close"
                             aria-label={`Close ${thread?.displayTitle ?? "tab"}`}
-                            onClick={() => onClose(id)}
+                            onClick={() => {
+                              onClose(id);
+                              panel.current?.focus({ preventScroll: true });
+                            }}
                           >
                             <Icon name="X" className="bbp-sheet__x" />
                           </button>
